@@ -3,6 +3,7 @@
 // PanVK 上都能跑, 方便替换前后对比。
 #include <jni.h>
 #include <android/log.h>
+#include <dlfcn.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -596,5 +597,148 @@ Java_com_zren_panvkprobe_ProbeNative_vulkanReport(JNIEnv *env, jclass clazz)
 	}
 
 	vkDestroyInstance(inst, NULL);
+	return (*env)->NewStringUTF(env, g_report);
+}
+
+/*
+ * 直接按 libhardware 的方式加载 HAL 模块并逐项报告, 用来定位"替换后没有设备"卡在哪:
+ *   dlopen -> dlsym("HMI") -> tag/id 检查 -> methods->open("vulkan") -> getInstanceProcAddr
+ * (AOSP 里 #define HAL_MODULE_INFO_SYM HMI, libhardware 找的符号就是 "HMI")
+ */
+typedef struct {
+	uint32_t tag;
+	uint16_t module_api_version;
+	uint16_t hal_api_version;
+	const char *id;
+	const char *name;
+	const char *author;
+	void *methods;
+	void *dso;
+	uint64_t reserved[32 - 7];
+} probe_hw_module_t;
+
+typedef struct {
+	uint32_t tag;
+	uint16_t module_api_version;
+	uint16_t hal_api_version;
+	const char *id;
+	const char *name;
+	const char *author;
+	const void *module;
+
+	uint64_t reserved[12];
+} probe_hw_device_t;
+
+typedef int (*probe_open_t)(const probe_hw_module_t *, const char *, probe_hw_device_t **);
+typedef void *(*probe_get_proc_t)(const void *, const char *);
+
+#define HW_MODULE_TAG 0x48574d54u /* MAKE_TAG_CONSTANT('H','W','M','T') */
+
+static void hal_probe_one(const char *path)
+{
+	void *handle;
+	probe_hw_module_t *mod;
+	probe_hw_device_t *dev = NULL;
+	probe_open_t open_fn;
+	const char *err;
+	int rc;
+
+	ap("路径: %s\n", path);
+	handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+	if (!handle) {
+		ap("  dlopen 失败: %s\n", dlerror());
+		return;
+	}
+	ap("  dlopen OK\n");
+
+	dlerror();
+	mod = (probe_hw_module_t *)dlsym(handle, "HMI");
+	if (!mod)
+		mod = (probe_hw_module_t *)dlsym(handle, "HAL_MODULE_INFO_SYM");
+	err = dlerror();
+	if (!mod) {
+		ap("  找不到 HMI 符号: %s\n", err ? err : "?");
+		return;
+	}
+	ap("  HMI: tag=0x%08x (期望 0x%08x) api=%u/%u\n",
+	   mod->tag, HW_MODULE_TAG, mod->module_api_version, mod->hal_api_version);
+	ap("       id=%s name=%s author=%s methods=%p\n",
+	   mod->id ? mod->id : "?", mod->name ? mod->name : "?",
+	   mod->author ? mod->author : "?", mod->methods);
+	if (mod->tag != HW_MODULE_TAG)
+		ap("  !! tag 不是标准 HAL tag, libhardware 会拒绝\n");
+	if (strcmp(mod->id ? mod->id : "", "vulkan") != 0)
+		ap("  !! id 不是 \"vulkan\"\n");
+	if (!mod->methods) {
+		ap("  没有 methods, 无法 open\n");
+		return;
+	}
+
+	open_fn = (probe_open_t)((void **)mod->methods)[0];
+	ap("  methods->open=%p\n", (void *)open_fn);
+	if (!open_fn) {
+		ap("  open 为空\n");
+		return;
+	}
+	rc = open_fn(mod, "vulkan", &dev);
+	ap("  open(\"vulkan\") = %d%s\n", rc, rc < 0 ? " (失败)" : "");
+	if (rc != 0 || !dev) {
+		ap("  结论: 驱动本体加载/初始化失败, 这一步失败就会导致 Vulkan 一个设备都没有\n");
+		return;
+	}
+
+	/* hwvulkan_device_t: common 之后紧跟 getInstanceProcAddr */
+	{
+		void *gipa = NULL;
+		probe_get_proc_t get_instance_proc = NULL;
+		size_t off;
+
+		/* 兼容两种布局: 直接跟在 common 后面 */
+		for (off = sizeof(probe_hw_device_t); off <= sizeof(probe_hw_device_t) + 16; off += 8) {
+			memcpy(&gipa, (const char *)dev + off, sizeof(gipa));
+			if (gipa) {
+				get_instance_proc = (probe_get_proc_t)gipa;
+				break;
+			}
+		}
+		ap("  getInstanceProcAddr=%p\n", gipa);
+		if (get_instance_proc) {
+			void *p = get_instance_proc(NULL, "vkEnumeratePhysicalDevices");
+			ap("  getInstanceProcAddr(\"vkEnumeratePhysicalDevices\")=%p%s\n",
+			   p, p ? " (可以枚举设备)" : " (拿不到, 驱动内部有问题)");
+		}
+	}
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_zren_panvkprobe_ProbeNative_halReport(JNIEnv *env, jclass clazz)
+{
+	static const char *paths[] = {
+		"/vendor/lib64/hw/vulkan.mali.so",
+		"/vendor/lib64/hw/vulkan.adreno.so",
+		"/system/lib64/libvulkan_panvk.so",
+		"/vendor/lib64/hw/vulkan.kmgsl.so",
+	};
+	uint32_t i;
+	char real[512];
+
+	(void)clazz;
+	g_off = 0;
+	g_report[0] = '\0';
+
+	ap("按 libhardware 的方式直接加载 HAL 模块 (替换后没设备时看这里)\n\n");
+	for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		const char *p = paths[i];
+		const char *rp = realpath(p, real);
+
+		if (!rp) {
+			ap("路径: %s -> 不存在\n\n", p);
+			continue;
+		}
+		if (strcmp(rp, p) != 0)
+			ap("(符号链接 -> %s)\n", rp);
+		hal_probe_one(p);
+		ap("\n");
+	}
 	return (*env)->NewStringUTF(env, g_report);
 }

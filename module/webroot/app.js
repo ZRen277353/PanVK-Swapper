@@ -251,10 +251,6 @@ function applyStatus(data) {
 	} else if (!warn) {
 		const shape = shapeLabel(data.driver_shape);
 		notices.push(`GPU ${gpu}, 当前驱动 ${data.driver} (${shape}, 共 ${data.driver_count || "0"} 个)。`);
-		if (data.driver_shape === "hmi") {
-			notices.push("该驱动只导出 HMI, 标准 loader 不认, 替换后可能没有任何 Vulkan 设备。");
-			warn = true;
-		}
 	}
 	els.noticePanel.hidden = false;
 	els.noticePanel.classList.toggle("ok", !warn);
@@ -271,7 +267,7 @@ function shapeLabel(shape) {
 		return "HAL";
 	}
 	if (shape === "hmi") {
-		return "HAL/HMI";
+		return "HAL";
 	}
 	if (shape === "icd") {
 		return "ICD";
@@ -683,10 +679,6 @@ function renderDrivers() {
 		els.driverHint.textContent = `当前使用 ${active.name}; 换驱动后需要重启一次`;
 	} else {
 		els.driverHint.textContent = `${active.name} 已选中但还没生效, 重启后生效`;
-	}
-	if (active && active.shape === "hmi") {
-		els.driverHint.textContent =
-			"注意: 这个驱动只导出 HMI, Android 标准 loader 不认, 替换后 Vulkan 可能没有设备";
 	}
 }
 

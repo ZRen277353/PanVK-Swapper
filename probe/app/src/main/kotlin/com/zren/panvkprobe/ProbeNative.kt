@@ -7,4 +7,7 @@ object ProbeNative {
     }
 
     external fun vulkanReport(): String
+
+    /// 直接按 libhardware 的方式加载 HAL 模块并逐项报告, 用来定位替换后没设备的原因
+    external fun halReport(): String
 }

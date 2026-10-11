@@ -1,6 +1,6 @@
 id=panvk_swapper
 name=PanVK Swapper
-version=v0.1.4
-versionCode=5
+version=v0.1.5
+versionCode=6
 author=ZRen277353
 description=按应用把用户层图形驱动替换为 PanVK 开源驱动: WebUI 里按应用名/包名搜索勾选, 驱动在 WebUI 内置驱动库里导入并用单选切换, 内核模块只重定向这些进程的 Vulkan 加载路径 (多 GKI KMI 自动适配)。

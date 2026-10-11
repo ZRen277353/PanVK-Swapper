@@ -114,11 +114,10 @@ G310/G510/G610/G615/G710/G715/G720/G925 等）。模块只负责：
 两种形态最终都落到同一个 `/system/lib64/libvulkan_panvk.so`，所以切换驱动只要换文件 + 重启。
 把 HAL 库挂到 ICD 描述上（或反过来）loader 只会加载失败，所以形态是自动判定的。
 
-**注意驱动的符号**：Android 标准 loader 只认两种入口 —— HAL 的
-`HAL_MODULE_INFO_SYM`，或 ICD 的 `vk_icdGetInstanceProcAddr`。有些社区构建
-（例如 Winlator/Vortek 生态里的 PanVK，包内 so 只导出 `HMI`）是给它们自家 loader 用的，
-直接替换会出现「loader 正常但一个 Vulkan 设备都没有」：`import-driver.sh` 会把这种
-载荷标成 `hmi` 并在 WebUI 里提示，遇到就换一个标准 HAL 或 ICD 形态的构建。
+**关于驱动符号**：AOSP 里 `#define HAL_MODULE_INFO_SYM HMI`，`libhardware` 找的符号
+就是 **`HMI`**，所以社区那些只导出 `HMI` 的 PanVK 构建（Winlator/Vortek 生态，例如
+`wonderkast02/panvk-g720-kbase-csf`）本身就是标准 HAL 模块，可以按 HAL 形态导入；
+另一条路是 ICD（导出 `vk_icdGetInstanceProcAddr`）。两者都能被模块识别。
 
 ## 内核模块参数
 

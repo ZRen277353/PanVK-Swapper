@@ -52,6 +52,7 @@ private fun ProbeScreen() {
     var envText by remember { mutableStateOf("检测中...") }
     var glText by remember { mutableStateOf("检测中...") }
     var vkText by remember { mutableStateOf("检测中...") }
+    var halText by remember { mutableStateOf("检测中...") }
     var busy by remember { mutableStateOf(true) }
     var savedPath by remember { mutableStateOf<String?>(null) }
     var refreshKey by remember { mutableStateOf(0) }
@@ -64,6 +65,9 @@ private fun ProbeScreen() {
         }
         vkText = withContext(Dispatchers.Default) {
             runCatching { ProbeNative.vulkanReport() }.getOrElse { "Vulkan 检测异常: ${it.message}\n" }
+        }
+        halText = withContext(Dispatchers.Default) {
+            runCatching { ProbeNative.halReport() }.getOrElse { "HAL 检测异常: ${it.message}\n" }
         }
         envText = withContext(Dispatchers.IO) {
             runCatching { EnvProbe.report() }.getOrElse { "环境检测异常: ${it.message}\n" }
@@ -102,6 +106,13 @@ private fun ProbeScreen() {
                 }
             }
 
+            SmallTitle("HAL 模块直连")
+            Card {
+                Column(Modifier.padding(16.dp)) {
+                    Text(halText)
+                }
+            }
+
             Spacer(Modifier.height(16.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -121,7 +132,8 @@ private fun ProbeScreen() {
                         )
                         runCatching {
                             file.writeText(
-                                "== 驱动环境 ==\n$envText\n== OpenGL ES ==\n$glText\n== Vulkan ==\n$vkText\n"
+                                "== 驱动环境 ==\n$envText\n== OpenGL ES ==\n$glText\n" +
+                                    "== Vulkan ==\n$vkText\n== HAL 模块直连 ==\n$halText\n"
                             )
                             savedPath = file.absolutePath
                         }
