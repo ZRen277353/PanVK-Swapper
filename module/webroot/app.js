@@ -25,6 +25,8 @@ const els = {
 	noticeText: document.getElementById("noticeText"),
 	autoStartSwitch: document.getElementById("autoStartSwitch"),
 	autoStartHint: document.getElementById("autoStartHint"),
+	halSwapSwitch: document.getElementById("halSwapSwitch"),
+	halSwapHint: document.getElementById("halSwapHint"),
 	searchInput: document.getElementById("searchInput"),
 	sysToggle: document.getElementById("sysToggle"),
 	appList: document.getElementById("appList"),
@@ -150,6 +152,7 @@ function setBusy(isBusy) {
 	state.busy = isBusy;
 	els.toggleBtn.disabled = isBusy;
 	els.autoStartSwitch.disabled = isBusy;
+	els.halSwapSwitch.disabled = isBusy;
 	els.refreshLogsBtn.disabled = isBusy;
 	els.saveBtn.disabled = isBusy || !isDirty();
 }
@@ -176,10 +179,11 @@ function applyStatus(data) {
 	const enabled = data.enabled === "1";
 	const loaded = data.loaded === "1";
 	const available = data.available === "1";
-	const driverPresent = data.driver_present === "1";
-	const icdPresent = data.icd_present === "1";
+	const payloadPresent = data.payload_present === "1";
 	const count = data.count || "0";
 	const redirects = data.redirects || "0";
+	const gpu = data.gpu || "未识别";
+	const payload = data.payload || "无";
 
 	els.statePill.classList.remove("on", "off", "warn");
 	if (enabled && loaded && available) {
@@ -207,26 +211,24 @@ function applyStatus(data) {
 		els.masterHint.textContent = "未启用, 还没有勾选应用";
 	}
 
-	/* 驱动 / 探针缺失提示 */
+	/* 驱动与探针状态 */
 	const notices = [];
-	if (!available) {
-		notices.push("内核模块的 do_filp_open 探针没有注册成功, 替换不会生效, 请查看运行日志。");
+	if (loaded && !available) {
+		notices.push("内核探针没有注册成功 (do_filp_open 不可用), 替换不会生效, 详见运行日志。");
 	}
-	if (!icdPresent) {
-		notices.push("模块里找不到 PanVK 的 ICD 描述文件 (system/etc/panvk/icd.d/panvk.json)。");
-	}
-	if (!driverPresent) {
-		notices.push("模块里没有 libvulkan_panvk.so, 需要把自己编译的 PanVK 驱动放到 system/lib64/ 后重启。");
-	}
-	if (notices.length) {
-		els.noticePanel.hidden = false;
-		els.noticeText.textContent = notices.join(" ");
+	if (!payloadPresent) {
+		notices.push("模块里没有 PanVK 驱动, 请安装带驱动的构建产物, 或用 install-panvk.sh 放入后重启。");
 	} else {
-		els.noticePanel.hidden = true;
+		notices.push(`GPU ${gpu}, 当前载荷 ${payload} (共 ${data.payloads || "0"} 个)。`);
 	}
+	els.noticePanel.hidden = false;
+	els.noticePanel.classList.toggle("ok", payloadPresent && (!loaded || available));
+	els.noticeText.textContent = notices.join(" ");
 
 	els.autoStartSwitch.checked = data.auto_start === "1";
 	els.autoStartHint.textContent = data.auto_start === "1" ? "开启" : "关闭";
+	els.halSwapSwitch.checked = data.hal_swap === "1";
+	els.halSwapHint.textContent = data.hal_swap === "1" ? "开启" : "关闭";
 }
 
 function applySelectionFromStatus() {
@@ -455,6 +457,10 @@ els.saveBtn.addEventListener("click", () => {
 
 els.autoStartSwitch.addEventListener("change", (event) => {
 	void setFlag("auto_start", event.target.checked, els.autoStartSwitch);
+});
+
+els.halSwapSwitch.addEventListener("change", (event) => {
+	void setFlag("hal_swap", event.target.checked, els.halSwapSwitch);
 });
 
 els.searchInput.addEventListener("input", () => {

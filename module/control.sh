@@ -33,11 +33,24 @@ status_output() {
 	echo "redirects=$redir"
 	echo "kernel=$(uname -r)"
 	echo "target_kmi=$KMI"
-	echo "icd=$PANVK_ICD_SYSTEM"
-	if [ -f "$MODDIR/system/etc/panvk/icd.d/panvk.json" ]; then icd_present=1; else icd_present=0; fi
-	echo "icd_present=$icd_present"
-	if [ -f "$MODDIR/system/lib64/libvulkan_panvk.so" ]; then driver_present=1; else driver_present=0; fi
-	echo "driver_present=$driver_present"
+	echo "hal_swap=$(config_get hal_swap 0)"
+	echo "gpu=$(detect_gpu)"
+	if [ -f "$PAYLOADS_TSV" ]; then
+		echo "payloads=$(grep -c . "$PAYLOADS_TSV" 2>/dev/null || echo 0)"
+	else
+		echo "payloads=0"
+	fi
+	if select_payload; then
+		echo "payload=$PAYLOAD_NAME"
+		echo "payload_so=$PAYLOAD_SO"
+		echo "payload_json=$PAYLOAD_JSON"
+		echo "payload_present=1"
+	else
+		echo "payload="
+		echo "payload_so="
+		echo "payload_json="
+		echo "payload_present=0"
+	fi
 	echo "module_dir=$MODDIR"
 }
 
@@ -83,17 +96,21 @@ apply_module() {
 		log "选择已保存 ($(count_selected) 个应用), 启用后生效"
 		return 0
 	fi
-	push_uids
+	push_uids || return 1
+	push_rules || return 1
+	return 0
 }
 
 rules_output() {
 	if loaded; then
 		ko_param rules 2>/dev/null | tr ';' '\n'
 	else
-		echo "ko 未加载, 当前使用模块内置默认规则:"
-		echo "/vendor/etc/vulkan/icd.d/* -> $PANVK_ICD_SYSTEM"
-		echo "/system/etc/vulkan/icd.d/* -> $PANVK_ICD_SYSTEM"
-		echo "/odm/etc/vulkan/icd.d/*    -> $PANVK_ICD_SYSTEM"
+		if select_payload; then
+			echo "ko 未加载, 按当前配置将要下发的规则:"
+			build_rules 2>/dev/null | tr ';' '\n'
+		else
+			echo "模块里没有 PanVK 驱动载荷"
+		fi
 	fi
 }
 

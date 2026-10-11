@@ -60,7 +60,7 @@
 #define PS_MAX_RULES 8
 #define PS_MAX_UIDS  64
 #define PS_NAME_MAX  256
-#define PS_STR_MAX   512
+#define PS_STR_MAX   1024
 
 /* 默认替换目标: 模块 system 覆盖层里的 PanVK ICD 描述文件 */
 #define PS_PANVK_ICD "/system/etc/panvk/icd.d/panvk.json"

@@ -1,6 +1,7 @@
 /pkg/
 /artifacts/
 /dist/
+/driver/
 PanVK-Swapper-*.zip
 kernel/*.ko
 kernel/*.o

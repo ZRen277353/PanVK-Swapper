@@ -13,9 +13,13 @@ MODNAME=panvk_swapper
 KO=""; KOOFF=""; KMI=""
 CONFIG_FILE="$MODDIR/config.conf"
 LOG_FILE="$MODDIR/panvk_swapper.log"
-CONFIG_KEYS="packages auto_start enabled"
+CONFIG_KEYS="packages auto_start enabled hal_swap"
 
-# 模块自带的 PanVK ICD: 位于模块 system 覆盖层, 设备上可见路径为 /system/...
+# PanVK 驱动载荷清单 (CI 打进 system 覆盖层; 手动安装见 install-panvk.sh)
+PAYLOADS_TSV="$MODDIR/system/etc/panvk/payloads.tsv"
+PAYLOAD_NAME=""; PAYLOAD_SO=""; PAYLOAD_JSON=""
+
+# 模块自带的兜底 ICD (手动放进 libvulkan_panvk.so 时用), 设备上可见路径为 /system/...
 PANVK_ICD_SYSTEM="/system/etc/panvk/icd.d/panvk.json"
 PANVK_LIB_SYSTEM="/system/lib64/libvulkan_panvk.so"
 
@@ -73,7 +77,7 @@ config_set() {
 	key="$1"
 	value="$2"
 	case "$key" in
-		packages|auto_start|enabled) ;;
+		packages|auto_start|enabled|hal_swap) ;;
 		*) log "未知配置项: $key"; return 1 ;;
 	esac
 	tmp="$CONFIG_FILE.tmp.$$"
@@ -204,6 +208,95 @@ rewrite_ko_vermagic() {
 }
 
 # ------------------------------------------------------------------ #
+# PanVK 驱动载荷                                                      #
+# ------------------------------------------------------------------ #
+
+# 尽力识别 Mali GPU 型号, 只用于选载荷和展示
+detect_gpu() {
+	local f v
+	for f in /sys/kernel/gpu/gpu_model /sys/class/misc/mali0/device/gpuinfo /proc/gpufreq/gpufreq_gpu_model; do
+		[ -r "$f" ] || continue
+		v=$(head -n 1 "$f" 2>/dev/null | tr -d '\r\n')
+		if [ -n "$v" ]; then
+			printf '%s' "$v"
+			return 0
+		fi
+	done
+	v=$(dmesg 2>/dev/null | sed -n 's/.*\(Mali-G[0-9][0-9]*[A-Za-z0-9 ]*\).*/\1/p' | head -n 1)
+	if [ -n "$v" ]; then
+		printf '%s' "$v"
+		return 0
+	fi
+	getprop ro.hardware.vulkan 2>/dev/null
+}
+
+# 按 GPU 选载荷: gpu_match 命中优先, 否则用第一条; 都拿不到时回退到手动载荷
+select_payload() {
+	local line gpu
+	PAYLOAD_NAME=""; PAYLOAD_SO=""; PAYLOAD_JSON=""
+
+	if [ -f "$PAYLOADS_TSV" ]; then
+		gpu=$(detect_gpu)
+		line=$(awk -F'\t' -v gpu="$gpu" '
+			{ n++; if (n == 1) first = $0
+			  if (sel == "") {
+			      if ($4 == "") { sel = $0 }
+			      else {
+			          cnt = split($4, pats, ",")
+			          up = toupper(gpu)
+			          for (i = 1; i <= cnt; i++) {
+			              p = toupper(pats[i])
+			              if (p != "" && index(up, p) > 0) { sel = $0; break }
+			          }
+			      }
+			  } }
+			END { if (sel == "") print first; else print sel }
+		' "$PAYLOADS_TSV")
+	fi
+
+	if [ -n "$line" ]; then
+		PAYLOAD_NAME=$(printf '%s' "$line" | cut -f1)
+		PAYLOAD_SO=$(printf '%s' "$line" | cut -f2)
+		PAYLOAD_JSON=$(printf '%s' "$line" | cut -f3)
+	elif [ -f "$MODDIR/system/lib64/libvulkan_panvk.so" ]; then
+		PAYLOAD_NAME="manual"
+		PAYLOAD_SO="$PANVK_LIB_SYSTEM"
+		PAYLOAD_JSON="$PANVK_ICD_SYSTEM"
+	fi
+
+	[ -n "$PAYLOAD_JSON" ] || return 1
+	return 0
+}
+
+# 由载荷拼出 ko 的重定向规则 (src|dst;src|dst)
+build_rules() {
+	local rules d hwv
+	[ -n "$PAYLOAD_JSON" ] || return 1
+
+	rules=""
+	for d in /vendor/etc/vulkan/icd.d /system/etc/vulkan/icd.d /odm/etc/vulkan/icd.d; do
+		rules="${rules}${rules:+;}$d/*|$PAYLOAD_JSON"
+	done
+
+	# 可选: 连厂商 HAL 形态的 vulkan.<hw>.so 一起换掉 (载荷必须是 HAL 形态)
+	if [ "$(config_get hal_swap 0)" = "1" ] && [ -n "$PAYLOAD_SO" ]; then
+		hwv=$(getprop ro.hardware.vulkan 2>/dev/null)
+		[ -n "$hwv" ] && rules="$rules;/vendor/lib64/hw/vulkan.$hwv.so|$PAYLOAD_SO"
+		rules="$rules;/vendor/lib64/hw/vulkan.mali.so|$PAYLOAD_SO"
+	fi
+
+	# ko 的 rules 参数缓冲区有限, 超了就退回只用 ICD 规则
+	if [ ${#rules} -gt 480 ]; then
+		log "规则串过长 (${#rules} 字节), 只保留 ICD 规则"
+		rules=""
+		for d in /vendor/etc/vulkan/icd.d /system/etc/vulkan/icd.d /odm/etc/vulkan/icd.d; do
+			rules="${rules}${rules:+;}$d/*|$PAYLOAD_JSON"
+		done
+	fi
+	printf '%s' "$rules"
+}
+
+# ------------------------------------------------------------------ #
 # 加载 / 卸载                                                         #
 # ------------------------------------------------------------------ #
 
@@ -219,8 +312,27 @@ push_uids() {
 	return 0
 }
 
+# 载荷 -> ko 规则参数
+push_rules() {
+	local rules
+	select_payload >/dev/null 2>&1 || { log "没有可用的 PanVK 驱动载荷"; return 1; }
+	rules=$(build_rules) || return 1
+	[ -n "$rules" ] || return 1
+	ko_set rules "$rules" || return 1
+	log "已下发规则 (载荷 $PAYLOAD_NAME)"
+	return 0
+}
+
+insmod_ko() {
+	if [ -n "$KSUD" ]; then
+		$KSUD insmod "$KO" $1 >/dev/null 2>&1 && return 0
+	fi
+	$BB insmod "$KO" $1 >/dev/null 2>&1 && return 0
+	return 1
+}
+
 load_ko() {
-	local args v
+	local uids rules v
 	if ! select_ko; then
 		[ -n "$KMI" ] || log "没有适配本机内核 ($(uname -r)) 的 KMI, 请在仓库用 CI 构建对应包"
 		return 1
@@ -231,22 +343,36 @@ load_ko() {
 		log "没有勾选任何应用, 拒绝加载空模块"
 		return 1
 	fi
-	args="enabled=1 uids=$uids"
-
-	if [ -n "$KSUD" ]; then
-		$KSUD insmod "$KO" $args >/dev/null 2>&1 && { log "已加载: $KO ($args)"; return 0; }
+	if ! select_payload; then
+		log "模块里没有 PanVK 驱动载荷, 请安装带驱动的 CI 产物, 或用 install-panvk.sh 手动放入"
+		return 1
 	fi
-	$BB insmod "$KO" $args >/dev/null 2>&1 && { log "已加载: $KO ($args)"; return 0; }
+	rules=$(build_rules)
+	[ -n "$rules" ] || return 1
 
-	# 兜底: vermagic 不一致时学习 -> 回写 -> 重试
-	v=$(device_vermagic) || { log "拿不到设备 vermagic (vendor 模块和 kmsg 里都没有)"; return 1; }
-	rewrite_ko_vermagic "$v" || return 1
-	if [ -n "$KSUD" ]; then
-		$KSUD insmod "$KO" $args >/dev/null 2>&1 && { log "已加载(回写 vermagic 后): $KO"; return 0; }
+	# 先只带 uids 加载 (enabled 保持 0), 规则和开关随后经 sysfs 写入,
+	# 避免出现"规则还没下发就已经开始改写"的窗口
+	if insmod_ko "uids=$uids"; then
+		log "已加载: $KO (载荷 $PAYLOAD_NAME)"
+	else
+		# 兜底: vermagic 不一致时学习 -> 回写 -> 重试
+		v=$(device_vermagic) || { log "拿不到设备 vermagic (vendor 模块和 kmsg 里都没有)"; return 1; }
+		rewrite_ko_vermagic "$v" || return 1
+		if insmod_ko "uids=$uids"; then
+			log "已加载(回写 vermagic 后): $KO (载荷 $PAYLOAD_NAME)"
+		else
+			log "加载失败, 请查看内核日志 (dmesg | grep $MODNAME)"
+			return 1
+		fi
 	fi
-	$BB insmod "$KO" $args >/dev/null 2>&1 && { log "已加载(回写 vermagic 后): $KO"; return 0; }
-	log "加载失败, 请查看内核日志 (dmesg | grep $MODNAME)"
-	return 1
+
+	ko_set rules "$rules" || true
+	if ! ko_set enabled 1; then
+		unload_ko
+		return 1
+	fi
+	log "已启用: 载荷 $PAYLOAD_NAME, 目标 UID $uids"
+	return 0
 }
 
 unload_ko() {

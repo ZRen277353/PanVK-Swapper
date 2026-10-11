@@ -141,6 +141,15 @@ h2 {
 	line-height: 1.55;
 }
 
+.notice.ok {
+	border-color: var(--line);
+	background: var(--panel-strong);
+}
+
+.notice.ok p {
+	color: var(--muted);
+}
+
 .rows {
 	display: grid;
 	gap: 2px;
