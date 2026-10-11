@@ -345,12 +345,31 @@ button:disabled {
 
 .app-row {
 	display: grid;
-	grid-template-columns: auto minmax(0, 1fr) auto;
+	grid-template-columns: auto auto minmax(0, 1fr) auto;
 	align-items: center;
 	gap: 12px;
 	min-height: 52px;
 	padding: 8px 12px;
 	cursor: pointer;
+}
+
+.app-icon {
+	flex: 0 0 auto;
+	width: 36px;
+	height: 36px;
+	border-radius: 8px;
+	background: #0f1319;
+	object-fit: contain;
+}
+
+.app-icon-ph {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--muted);
+	background: var(--panel-strong);
+	font-size: 16px;
+	font-weight: 700;
 }
 
 .app-row + .app-row {
@@ -415,9 +434,12 @@ button:disabled {
 
 .app-sub {
 	display: block;
+	overflow: hidden;
 	margin-top: 2px;
 	color: var(--muted);
 	font-size: 12px;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .tag {

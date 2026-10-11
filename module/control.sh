@@ -51,6 +51,7 @@ status_output() {
 		echo "payload_json="
 		echo "payload_present=0"
 	fi
+	if [ -f "$MODDIR/pending-reboot" ]; then echo "pending_reboot=1"; else echo "pending_reboot=0"; fi
 	echo "module_dir=$MODDIR"
 }
 

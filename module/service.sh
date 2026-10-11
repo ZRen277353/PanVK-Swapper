@@ -8,6 +8,9 @@ case "$0" in
 esac
 . "$MODDIR/common.sh"
 
+# 上一次导入的驱动在本次开机时已经挂进 /system, 清掉待重启标记
+[ -f "$MODDIR/pending-reboot" ] && rm -f "$MODDIR/pending-reboot"
+
 [ "$(config_get auto_start 0)" = "1" ] || exit 0
 [ "$(config_get enabled 0)" = "1" ] || exit 0
 [ -n "$(config_get packages "")" ] || { log "开机自启已开启但没有勾选应用, 本次跳过"; exit 0; }

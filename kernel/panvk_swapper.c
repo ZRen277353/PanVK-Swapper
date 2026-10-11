@@ -57,26 +57,12 @@
 #include <linux/mm.h>
 #include <linux/fs.h>
 
-#define PS_MAX_RULES 8
-#define PS_MAX_UIDS  64
-#define PS_NAME_MAX  256
+#include "panvk_parse.h"
+
 #define PS_STR_MAX   1024
 
-/* 默认替换目标: 模块 system 覆盖层里的 PanVK ICD 描述文件 */
+/* 兜底替换目标; 正常运行时 control.sh 会下发按载荷生成的完整规则 */
 #define PS_PANVK_ICD "/system/etc/panvk/icd.d/panvk.json"
-
-struct ps_rule {
-	char src[PS_NAME_MAX];
-	char dst[PS_NAME_MAX];
-	unsigned short srclen;
-	unsigned short dstlen;
-	bool prefix;
-};
-
-struct ps_table {
-	unsigned int nr;
-	struct ps_rule rules[PS_MAX_RULES];
-};
 
 /* 规则表只在 ps_rules_lock 保护下替换/释放, 读者持同一把锁 */
 static struct ps_table *ps_rules;
@@ -97,41 +83,6 @@ static int ps_available;
 static char ps_uids_str[PS_STR_MAX];
 static char ps_rules_str[PS_STR_MAX];
 
-/* 自己解析, 不用 kstrtox.h (5.10 里没有这个头文件) */
-static const char *ps_span_u32(const char *p, unsigned int *out)
-{
-	unsigned long v = 0;
-
-	if (*p < '0' || *p > '9')
-		return NULL;
-	while (*p >= '0' && *p <= '9') {
-		v = v * 10 + (unsigned long)(*p - '0');
-		if (v > 0xffffffffUL)
-			return NULL;
-		p++;
-	}
-	*out = (unsigned int)v;
-	return p;   /* 指向数字之后的字符 */
-}
-
-static int ps_parse_bool(const char *val, bool *out)
-{
-	if (!val)
-		return -EINVAL;
-
-	if (!strcmp(val, "1") || !strcmp(val, "y") || !strcmp(val, "Y") ||
-	    !strcmp(val, "on") || !strcmp(val, "true")) {
-		*out = true;
-		return 0;
-	}
-	if (!strcmp(val, "0") || !strcmp(val, "n") || !strcmp(val, "N") ||
-	    !strcmp(val, "off") || !strcmp(val, "false")) {
-		*out = false;
-		return 0;
-	}
-	return -EINVAL;
-}
-
 /* ------------------------------------------------------------------ */
 /* 规则表                                                              */
 /* ------------------------------------------------------------------ */
@@ -139,63 +90,13 @@ static int ps_parse_bool(const char *val, bool *out)
 static int ps_parse_rules(const char *val)
 {
 	struct ps_table *t;
-	const char *p = val;
 	unsigned long flags;
 
 	t = kzalloc(sizeof(*t), GFP_KERNEL);
 	if (!t)
 		return -ENOMEM;
 
-	while (*p && t->nr < PS_MAX_RULES) {
-		const char *end, *sep;
-		struct ps_rule *r;
-		size_t slen, dlen;
-
-		while (*p == ';' || *p == ',' || *p == ' ')
-			p++;
-		if (!*p)
-			break;
-
-		end = p;
-		while (*end && *end != ';')
-			end++;
-
-		sep = memchr(p, '|', end - p);
-		if (!sep) {
-			pr_warn("忽略无效规则 (缺少 '|'): %.*s\n",
-				(int)(end - p), p);
-			goto next;
-		}
-
-		slen = sep - p;
-		dlen = end - sep - 1;
-		if (!slen || !dlen || slen >= PS_NAME_MAX || dlen >= PS_NAME_MAX) {
-			pr_warn("忽略无效规则 (长度越界)\n");
-			goto next;
-		}
-
-		r = &t->rules[t->nr];
-		memcpy(r->src, p, slen);
-		r->src[slen] = '\0';
-		if (r->src[slen - 1] == '*') {
-			r->src[slen - 1] = '\0';
-			r->prefix = true;
-			slen--;
-		}
-		if (!slen) {
-			pr_warn("忽略无效规则 (空源路径)\n");
-			goto next;
-		}
-		r->srclen = (unsigned short)slen;
-
-		memcpy(r->dst, sep + 1, dlen);
-		r->dst[dlen] = '\0';
-		r->dstlen = (unsigned short)dlen;
-
-		t->nr++;
-next:
-		p = *end ? end + 1 : end;
-	}
+	ps_rules_parse(val, t);
 
 	spin_lock_irqsave(&ps_rules_lock, flags);
 	{
@@ -217,36 +118,10 @@ next:
 static int ps_parse_uids(const char *val)
 {
 	unsigned int tmp[PS_MAX_UIDS];
-	unsigned int nr = 0, min = 0, max = 0;
-	const char *p = val;
+	unsigned int nr, min = 0, max = 0;
 	unsigned long flags;
 
-	while (*p && nr < PS_MAX_UIDS) {
-		unsigned int uid;
-		const char *next;
-
-		while (*p == ',' || *p == ' ' || *p == '\n' || *p == '\t')
-			p++;
-		if (!*p)
-			break;
-
-		next = ps_span_u32(p, &uid);
-		if (!next) {
-			next = strpbrk(p, ", \n\t");
-			if (!next)
-				break;
-			p = next;
-			continue;
-		}
-
-		tmp[nr++] = uid;
-		if (nr == 1 || uid < min)
-			min = uid;
-		if (nr == 1 || uid > max)
-			max = uid;
-
-		p = next;
-	}
+	nr = ps_uids_parse(val, tmp, &min, &max);
 
 	spin_lock_irqsave(&ps_uids_lock, flags);
 	memcpy(ps_uids, tmp, nr * sizeof(tmp[0]));
@@ -361,11 +236,9 @@ static struct kprobe ps_kp = {
 static int ps_set_bool(const char *val, const struct kernel_param *kp)
 {
 	bool want;
-	int ret;
 
-	ret = ps_parse_bool(val, &want);
-	if (ret)
-		return ret;
+	if (!ps_parse_bool(val, &want))
+		return -EINVAL;
 
 	WRITE_ONCE(ps_enabled, want);
 	pr_info("总开关: %s\n", want ? "启用" : "停用");
@@ -384,6 +257,7 @@ static int ps_set_uids(const char *val, const struct kernel_param *kp)
 	ret = param_set_copystring(val, kp);
 	if (ret)
 		return ret;
+	ps_str_strip(ps_uids_str);
 	return ps_parse_uids(ps_uids_str);
 }
 
@@ -404,6 +278,7 @@ static int ps_set_rules(const char *val, const struct kernel_param *kp)
 	ret = param_set_copystring(val, kp);
 	if (ret)
 		return ret;
+	ps_str_strip(ps_rules_str);
 	return ps_parse_rules(ps_rules_str);
 }
 
@@ -497,4 +372,4 @@ module_exit(ps_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("ZRen277353");
 MODULE_DESCRIPTION("按 UID 把用户层图形驱动替换为 PanVK 开源驱动");
-MODULE_VERSION("0.1.0");
+MODULE_VERSION("0.1.1");

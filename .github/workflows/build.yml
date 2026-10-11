@@ -4,33 +4,29 @@ name: Build PanVK-Swapper
 # 构建环境: ddk (与 SakiSU 官方 LKM 相同的 GKI 官方构建环境)。
 # 矩阵覆盖各 GKI KMI 分支, 每个分支产出一个 ko; 汇总任务打出全 KMI 一体包,
 # 模块在设备上按 uname -r 自动选择。
-# 另外把 config/panvk-driver.json 列出的 PanVK 用户层驱动 (校验 SHA256 后)
-# 一起打进模块的 system 覆盖层, 模块在设备上按 GPU 选择对应载荷。
+# 模块不带 PanVK 驱动二进制, 驱动由设备端 import-driver.sh 自行导入。
 on:
   push:
     branches: [ main ]
-    paths: [ 'kernel/**', 'module/**', 'config/**', 'scripts/**', '.github/workflows/**' ]
+    paths: [ 'kernel/**', 'module/**', 'tools/**', 'scripts/**', '.github/workflows/**' ]
   workflow_dispatch:
 
 jobs:
-  drivers:
+  host-test:
     runs-on: ubuntu-22.04
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 下载并校验 PanVK 驱动载荷
-        run: python3 scripts/fetch-drivers.py --out driver
-
-      - name: 上传驱动载荷
-        uses: actions/upload-artifact@v4
-        with:
-          name: panvk-drivers
-          path: driver/*
-          if-no-files-found: error
+      - name: 参数解析单元测试 (主机端)
+        # 真机上 "echo 1 > .../parameters/enabled" 写的是 "1\n",
+        # 参数解析必须容忍尾部换行, 这里把这类回归固化住
+        run: |
+          gcc -std=gnu11 -Wall -I tools/host-stubs tools/param-parse-test.c -o /tmp/param-parse-test
+          /tmp/param-parse-test
 
   build:
-    needs: drivers
+    needs: host-test
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -47,12 +43,6 @@ jobs:
           sudo curl -fsSL https://raw.githubusercontent.com/5ec1cff/ddk/main/scripts/ddk \
             -o /usr/local/bin/ddk
           sudo chmod +x /usr/local/bin/ddk
-
-      - name: 下载 PanVK 驱动载荷
-        uses: actions/download-artifact@v4
-        with:
-          name: panvk-drivers
-          path: drivers
 
       - name: 编译内核模块 (${{ matrix.kmi }})
         run: |
@@ -81,8 +71,6 @@ jobs:
           print('vermagic value: offset=%d len=%d' % (i + 9, j - i - 9))
           open('pkg/panvk_swapper.offset', 'w').write('%d %d\n' % (i + 9, j - i - 9))
           EOF
-          # 把 PanVK 驱动铺进模块的 system 覆盖层
-          python3 scripts/stage-drivers.py --drivers drivers --pkg pkg
           cd pkg && zip -rq9 "$GITHUB_WORKSPACE/PanVK-Swapper-${{ matrix.kmi }}.zip" .
 
       - name: 上传单 KMI 产物
@@ -92,7 +80,7 @@ jobs:
           path: PanVK-Swapper-*.zip
 
   package-all:
-    needs: [drivers, build]
+    needs: build
     runs-on: ubuntu-22.04
     steps:
       - name: 检出代码
@@ -103,12 +91,6 @@ jobs:
         with:
           path: artifacts
           pattern: PanVK-Swapper-*
-
-      - name: 下载 PanVK 驱动载荷
-        uses: actions/download-artifact@v4
-        with:
-          name: panvk-drivers
-          path: drivers
 
       - name: 汇总多 KMI 一体包 (设备端按 uname -r 自动选择)
         run: |
@@ -137,8 +119,6 @@ jobs:
           if 'android14-6.1' not in found:
               sys.exit('主目标 android14-6.1 缺失')
           EOF
-          # 一体包里也要带 PanVK 驱动
-          python3 scripts/stage-drivers.py --drivers drivers --pkg pkg
           cd pkg && zip -rq9 "$GITHUB_WORKSPACE/PanVK-Swapper-all-kmi.zip" .
 
       - name: 上传一体包

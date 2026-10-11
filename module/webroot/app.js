@@ -15,6 +15,7 @@ const state = {
 	saved: new Set(),
 	busy: false,
 	filterSystem: false,
+	hasAppInfo: true,
 };
 
 const els = {
@@ -213,16 +214,23 @@ function applyStatus(data) {
 
 	/* 驱动与探针状态 */
 	const notices = [];
+	let warn = false;
 	if (loaded && !available) {
 		notices.push("内核探针没有注册成功 (do_filp_open 不可用), 替换不会生效, 详见运行日志。");
+		warn = true;
+	}
+	if (data.pending_reboot === "1") {
+		notices.push("刚导入的驱动要重启一次才会挂进 /system, 重启后再启用。");
+		warn = true;
 	}
 	if (!payloadPresent) {
-		notices.push("模块里没有 PanVK 驱动, 请安装带驱动的构建产物, 或用 install-panvk.sh 放入后重启。");
-	} else {
+		notices.push("模块里没有 PanVK 驱动, 先用 import-driver.sh 导入一个 .so 再启用。");
+		warn = true;
+	} else if (!warn) {
 		notices.push(`GPU ${gpu}, 当前载荷 ${payload} (共 ${data.payloads || "0"} 个)。`);
 	}
 	els.noticePanel.hidden = false;
-	els.noticePanel.classList.toggle("ok", payloadPresent && (!loaded || available));
+	els.noticePanel.classList.toggle("ok", !warn);
 	els.noticeText.textContent = notices.join(" ");
 
 	els.autoStartSwitch.checked = data.auto_start === "1";
@@ -254,8 +262,64 @@ async function refreshLogs() {
 /* ------------------------------------------------------------------ */
 
 async function loadApps() {
-	const result = await run("apps");
+	state.hasAppInfo = hasPackageApi();
 	state.apps = [];
+
+	let count = 0;
+	if (state.hasAppInfo) {
+		try {
+			count = await loadAppsFromApi();
+		} catch (error) {
+			count = 0;
+		}
+	}
+	if (!count) {
+		state.hasAppInfo = false;
+		count = await loadAppsFromShell();
+	}
+
+	state.apps.sort((a, b) =>
+		a.label.localeCompare(b.label, "zh-Hans") || a.name.localeCompare(b.name));
+	renderApps();
+}
+
+/* 新版 KernelSU WebUI 提供 listPackages/getPackagesInfo, 能拿到软件名、系统标记和 uid */
+function hasPackageApi() {
+	return !!(window.ksu
+		&& typeof window.ksu.listPackages === "function"
+		&& typeof window.ksu.getPackagesInfo === "function");
+}
+
+async function loadAppsFromApi() {
+	const names = window.ksu.listPackages("all") || [];
+	if (!names.length) {
+		return 0;
+	}
+
+	const apps = [];
+	const chunk = 200;
+	for (let i = 0; i < names.length; i += chunk) {
+		const infos = window.ksu.getPackagesInfo(names.slice(i, i + chunk)) || [];
+		for (const info of infos) {
+			if (!info || !info.packageName) {
+				continue;
+			}
+			apps.push({
+				name: info.packageName,
+				label: info.appLabel || info.packageName,
+				uid: info.uid === undefined || info.uid === null ? "" : String(info.uid),
+				system: !!info.isSystem,
+				icon: true,
+			});
+		}
+	}
+	state.apps = apps;
+	return apps.length;
+}
+
+async function loadAppsFromShell() {
+	const result = await run("apps");
+	const apps = [];
 	for (const line of result.stdout.split(/\r?\n/)) {
 		if (!line) {
 			continue;
@@ -264,13 +328,39 @@ async function loadApps() {
 		if (parts.length < 2) {
 			continue;
 		}
-		state.apps.push({
+		apps.push({
 			name: parts[0],
+			label: parts[0],
 			uid: parts[1],
 			system: parts[2] === "1",
+			icon: false,
 		});
 	}
-	renderApps();
+	state.apps = apps;
+	return apps.length;
+}
+
+function appAvatar(app) {
+	if (app.icon) {
+		const img = document.createElement("img");
+		img.className = "app-icon";
+		img.loading = "lazy";
+		img.decoding = "async";
+		img.alt = "";
+		img.src = `ksu://icon/${app.name}`;
+		img.addEventListener("error", () => {
+			img.replaceWith(appAvatarFallback(app));
+		});
+		return img;
+	}
+	return appAvatarFallback(app);
+}
+
+function appAvatarFallback(app) {
+	const span = document.createElement("span");
+	span.className = "app-icon app-icon-ph";
+	span.textContent = (app.label || app.name || "?").slice(0, 1).toUpperCase();
+	return span;
 }
 
 function renderApps() {
@@ -279,6 +369,7 @@ function renderApps() {
 		const row = document.createElement("label");
 		row.className = "app-row";
 		row.dataset.name = app.name;
+		row.dataset.label = app.label || app.name;
 		row.dataset.system = app.system ? "1" : "0";
 
 		const check = document.createElement("input");
@@ -298,14 +389,17 @@ function renderApps() {
 		meta.className = "app-meta";
 		const name = document.createElement("span");
 		name.className = "app-name";
-		name.textContent = app.name;
+		name.textContent = app.label || app.name;
 		const sub = document.createElement("span");
 		sub.className = "app-sub";
-		sub.textContent = `uid ${app.uid}`;
+		sub.textContent = app.uid === "" || app.uid === app.name
+			? app.name
+			: `${app.name} · uid ${app.uid}`;
 		meta.appendChild(name);
 		meta.appendChild(sub);
 
 		row.appendChild(check);
+		row.appendChild(appAvatar(app));
 		row.appendChild(meta);
 		if (app.system) {
 			const tag = document.createElement("span");
@@ -331,7 +425,9 @@ function applyFilter() {
 	const needle = els.searchInput.value.trim().toLowerCase();
 	let visible = 0;
 	for (const row of els.appList.querySelectorAll(".app-row")) {
-		const matchesText = !needle || row.dataset.name.toLowerCase().includes(needle);
+		/* 软件名和包名都能搜 */
+		const haystack = `${row.dataset.label || ""} ${row.dataset.name || ""}`.toLowerCase();
+		const matchesText = !needle || haystack.includes(needle);
 		const matchesSystem = state.filterSystem || row.dataset.system !== "1";
 		const show = matchesText && matchesSystem;
 		row.hidden = !show;
@@ -361,7 +457,9 @@ function updateSelectionUi() {
 	} else if (missing.length) {
 		els.listHint.textContent = `${missing.length} 个已选应用当前未安装`;
 	} else if (state.apps.length && visible) {
-		els.listHint.textContent = `共 ${state.apps.length} 个应用`;
+		els.listHint.textContent = state.hasAppInfo
+			? `共 ${state.apps.length} 个应用`
+			: `共 ${state.apps.length} 个应用 (当前管理器没有应用信息接口, 只显示包名)`;
 	}
 }
 

@@ -265,6 +265,12 @@ select_payload() {
 	fi
 
 	[ -n "$PAYLOAD_JSON" ] || return 1
+	# 载荷文件必须真的在模块目录里 (tsv 里存的是设备路径)
+	if [ ! -f "$MODDIR$PAYLOAD_SO" ]; then
+		log "载荷 $PAYLOAD_NAME 的文件不在模块里: $PAYLOAD_SO"
+		PAYLOAD_NAME=""; PAYLOAD_SO=""; PAYLOAD_JSON=""
+		return 1
+	fi
 	return 0
 }
 
@@ -315,6 +321,10 @@ push_uids() {
 # 载荷 -> ko 规则参数
 push_rules() {
 	local rules
+	if [ -f "$MODDIR/pending-reboot" ]; then
+		log "刚导入的驱动要重启一次才会挂进 /system, 先重启再启用"
+		return 1
+	fi
 	select_payload >/dev/null 2>&1 || { log "没有可用的 PanVK 驱动载荷"; return 1; }
 	rules=$(build_rules) || return 1
 	[ -n "$rules" ] || return 1
@@ -344,7 +354,11 @@ load_ko() {
 		return 1
 	fi
 	if ! select_payload; then
-		log "模块里没有 PanVK 驱动载荷, 请安装带驱动的 CI 产物, 或用 install-panvk.sh 手动放入"
+		log "模块里没有可用的 PanVK 驱动, 请先用 import-driver.sh 导入一个"
+		return 1
+	fi
+	if [ -f "$MODDIR/pending-reboot" ]; then
+		log "刚导入的驱动要重启一次才会挂进 /system, 请先重启设备"
 		return 1
 	fi
 	rules=$(build_rules)
