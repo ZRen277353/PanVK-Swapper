@@ -2,7 +2,7 @@
 # 导入自定义的 PanVK 用户层驱动 (模块本身不带任何驱动二进制)。
 #
 #   sh import-driver.sh /sdcard/libvulkan_panvk.so
-#   sh import-driver.sh /sdcard/vulkan.mali.so --name mali-hal --hal --gpu G610,G615
+#   sh import-driver.sh /sdcard/vulkan.mali.so --name mali-hal --gpu G610,G615
 #   sh import-driver.sh --list
 #   sh import-driver.sh --remove mali-hal
 #
@@ -27,8 +27,10 @@ usage() {
 选项:
   --name NAME      载荷名字, 只能用小写字母/数字/短横线 (默认 custom)
   --gpu PATTERNS   逗号分隔的 GPU 名字片段, 命中才用这个载荷 (默认不限制)
-  --hal            驱动是 HAL 形态 (vulkan.mali.so), 顺便打开 hal_swap
-  --force          跳过 ICD/HAL 标记检查, 强制导入
+  --shape icd|hal  驱动形态 (默认按导出接口自动识别):
+                     icd = 有 vk_icdGetInstanceProcAddr, 替换 icd.d 里的描述文件
+                     hal = 有 HMI/HAL_MODULE_INFO_SYM, 替换 vulkan.<hw>.so (vulkan.mali.so)
+  --force          跳过标记检查, 强制导入 (形态仍按 --shape, 默认 icd)
 EOF
 }
 
@@ -63,9 +65,9 @@ check_driver() {
 	fi
 	if [ "$FORCE" != "1" ]; then
 		if grep -q 'vk_icdGetInstanceProcAddr' "$file" 2>/dev/null; then
-			:
-		elif grep -q 'HAL_MODULE_INFO_SYM' "$file" 2>/dev/null; then
-			HAS_HAL=1
+			AUTO_SHAPE="icd"
+		elif grep -q 'HAL_MODULE_INFO_SYM' "$file" 2>/dev/null || grep -q 'HMI' "$file" 2>/dev/null; then
+			AUTO_SHAPE="hal"
 		else
 			log "既没有 Vulkan ICD 接口也没有 HAL 模块标记, 不像图形驱动 (确认无误可加 --force)"
 			return 1
@@ -80,7 +82,7 @@ list_payloads() {
 		return 0
 	fi
 	log "已导入的载荷 (名字 / 设备路径 / GPU 匹配 / 来源):"
-	awk -F'\t' '{ printf "  %-14s %-52s %-24s %s\n", $1, $2, ($4 == "" ? "(不限)" : $4), ($5 == "" ? "-" : $5) }' "$PAYLOADS_TSV"
+	awk -F'\t' '{ printf "  %-14s %-10s %-24s %s\n", $1, ($5 == "" ? "?" : $5), ($4 == "" ? "(不限)" : $4), $2 }' "$PAYLOADS_TSV"
 	if [ -f "$PENDING" ]; then
 		log "注意: 有载荷还没经过重启挂载, 先重启设备"
 	fi
@@ -107,9 +109,9 @@ remove_payload() {
 SRC=""
 NAME="custom"
 GPU=""
-HAL=0
+SHAPE=""
 FORCE=0
-HAS_HAL=0
+AUTO_SHAPE=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -117,7 +119,8 @@ while [ $# -gt 0 ]; do
 		--remove) remove_payload "$2"; exit $? ;;
 		--name)   NAME="$2"; shift 2 ;;
 		--gpu)    GPU="$2"; shift 2 ;;
-		--hal)    HAL=1; shift ;;
+		--hal)    SHAPE="hal"; shift ;;
+		--shape)  SHAPE="$2"; shift 2 ;;
 		--force)  FORCE=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		-*)       log "未知选项: $1"; usage; exit 1 ;;
@@ -134,10 +137,17 @@ esac
 
 log "检查驱动: $SRC"
 check_driver "$SRC" || exit 1
-if [ "$HAS_HAL" = "1" ]; then
-	HAL=1
-	log "检测到 HAL 模块标记, 将按 HAL 形态处理"
+
+if [ -z "$SHAPE" ]; then
+	SHAPE="$AUTO_SHAPE"
+elif [ "$FORCE" != "1" ] && [ -n "$AUTO_SHAPE" ] && [ "$SHAPE" != "$AUTO_SHAPE" ]; then
+	log "提示: 文件看起来是 $AUTO_SHAPE 形态, 但按 --shape $SHAPE 处理"
 fi
+case "$SHAPE" in
+	icd) log "形态: ICD (替换 /vendor/etc/vulkan/icd.d/* 的加载路径)" ;;
+	hal) log "形态: HAL (替换 /vendor/lib64/hw/vulkan.<hw>.so 的加载路径)" ;;
+	*)   log "未知形态: $SHAPE"; exit 1 ;;
+esac
 
 mkdir -p "$LIB_DIR" "$ICD_DIR" || exit 1
 SO_NAME="libvulkan_panvk-$NAME.so"
@@ -159,22 +169,18 @@ command -v chcon >/dev/null 2>&1 && chcon u:object_r:system_file:s0 "$LIB_DIR/$S
 
 # 新导入的排在最前面, 保证它就是当前生效的载荷
 tmp="${PAYLOADS_TSV}.tmp.$$"
-printf '%s\t%s\t%s\t%s\t%s\n' \
-	"$NAME" "/system/lib64/$SO_NAME" "/system/etc/panvk/icd.d/$JSON_NAME" "$GPU" "import: $SRC" > "$tmp"
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+	"$NAME" "/system/lib64/$SO_NAME" "/system/etc/panvk/icd.d/$JSON_NAME" "$GPU" "$SHAPE" "import: $SRC" > "$tmp"
 if [ -f "$PAYLOADS_TSV" ]; then
 	awk -F'\t' -v n="$NAME" '$1 != n' "$PAYLOADS_TSV" >> "$tmp"
 fi
 mv "$tmp" "$PAYLOADS_TSV" || exit 1
-
-if [ "$HAL" = "1" ]; then
-	config_set hal_swap 1
-	log "已打开 hal_swap (会连厂商 vulkan.<hw>.so 一起替换)"
-fi
 
 touch "$PENDING"
 
 log "已导入载荷 $NAME"
 log "  驱动: $LIB_DIR/$SO_NAME"
 log "  ICD : $ICD_DIR/$JSON_NAME"
+log "  形态: $SHAPE"
 [ -n "$GPU" ] && log "  GPU : $GPU"
 log "覆盖层在开机时挂载, 请重启设备; 重启后在 WebUI 里启用 (或打开开机自启)。"

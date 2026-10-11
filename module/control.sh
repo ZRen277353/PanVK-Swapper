@@ -33,7 +33,6 @@ status_output() {
 	echo "redirects=$redir"
 	echo "kernel=$(uname -r)"
 	echo "target_kmi=$KMI"
-	echo "hal_swap=$(config_get hal_swap 0)"
 	echo "gpu=$(detect_gpu)"
 	if [ -f "$PAYLOADS_TSV" ]; then
 		echo "payloads=$(grep -c . "$PAYLOADS_TSV" 2>/dev/null || echo 0)"
@@ -42,11 +41,13 @@ status_output() {
 	fi
 	if select_payload; then
 		echo "payload=$PAYLOAD_NAME"
+		echo "payload_shape=$PAYLOAD_SHAPE"
 		echo "payload_so=$PAYLOAD_SO"
 		echo "payload_json=$PAYLOAD_JSON"
 		echo "payload_present=1"
 	else
 		echo "payload="
+		echo "payload_shape="
 		echo "payload_so="
 		echo "payload_json="
 		echo "payload_present=0"

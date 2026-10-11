@@ -70,15 +70,20 @@ tools/                    # 主机端参数解析单元测试 (含最小内核�
 2. 导入你自己的 PanVK 驱动（模块**不带**任何驱动二进制）：
 
    ```sh
+   # ICD 形态（导出 vk_icdGetInstanceProcAddr，替换 icd.d 里的描述文件）
    sh /data/adb/modules/panvk_swapper/import-driver.sh /sdcard/libvulkan_panvk.so
-   # HAL 形态的驱动（vulkan.mali.so）：
-   sh /data/adb/modules/panvk_swapper/import-driver.sh /sdcard/vulkan.mali.so --name mali-hal --hal
+
+   # HAL 形态（导出 HMI / HAL_MODULE_INFO_SYM，替换 /vendor/lib64/hw/vulkan.mali.so）
+   sh /data/adb/modules/panvk_swapper/import-driver.sh /sdcard/libvulkan_panfrost.so \
+       --name minegraph --gpu G610,G615,G710,G715,G720
+
    sh /data/adb/modules/panvk_swapper/import-driver.sh --list
    sh /data/adb/modules/panvk_swapper/import-driver.sh --remove mali-hal
    ```
 
-   脚本会检查 ELF/aarch64/共享库并通过 ICD 或 HAL 标记确认是图形驱动，然后放进模块的
-   `system/lib64/` 与 `system/etc/panvk/icd.d/`，并登记到 `payloads.tsv`。
+   脚本会检查 ELF/aarch64/共享库，并按导出接口自动识别形态（`vk_icdGetInstanceProcAddr`
+   是 ICD，`HMI`/`HAL_MODULE_INFO_SYM` 是 HAL；识别不准时用 `--shape icd|hal` 覆盖），
+   然后放进模块的 `system/lib64/` 与 `system/etc/panvk/icd.d/`，登记到 `payloads.tsv`。
    system 覆盖层在开机时挂载，所以**导入后要重启一次**；重启前 WebUI 会提示「需要重启」。
 
 3. 打开模块 WebUI：
@@ -102,6 +107,16 @@ G310/G510/G610/G615/G710/G715/G720/G925 等）。模块只负责：
 启用时会先识别设备 GPU（`/sys/kernel/gpu/gpu_model`、mali0 的 gpuinfo、dmesg 等），
 挑 `gpu_match` 命中的载荷（没写 `gpu_match` 或都没命中就用第一条），然后才把重定向规则
 写进内核模块。多个载荷可以共存，`--gpu` 用来给它们分工。
+
+替换哪条路径由载荷**形态**决定，两者不能混用：
+
+* ICD 形态：改 `/vendor/etc/vulkan/icd.d/*` 等描述文件的加载路径，指向模块生成的
+  `panvk-<name>.json`；
+* HAL 形态：改 `/vendor/lib64/hw/vulkan.<ro.hardware.vulkan>.so`（通常就是
+  `vulkan.mali.so`）的加载路径，直接指向驱动本体。
+
+把 HAL 库挂到 ICD 描述上（或反过来）loader 只会加载失败，所以形态是自动判定并在
+`--list` 里显示的。
 
 ## 内核模块参数
 
@@ -131,9 +146,8 @@ G310/G510/G610/G615/G710/G715/G720/G925 等）。模块只负责：
 * 只影响"打开文件"这条路径，已经打开的 fd 不会被换掉，因此需要重启目标应用；
 * 驱动能不能跑起来取决于载荷是否匹配你的 GPU 世代（JM v9 / CSF v10+）和你设备的 kbase 版本；
   这些 kbase 移植都还在实验阶段，遇到异常先看日志、换载荷再试；
-* 默认只替换 Vulkan 的 ICD 描述文件，不动厂商的 `vulkan.mali.so`；如果你的机型是直接加载
-  HAL 形态驱动的，导入时加 `--hal`（或事后在 WebUI 的「高级」里打开「替换 vulkan.mali.so」），
-  但那种载荷必须是 HAL 形态。
+* 替换目标由载荷形态决定（ICD 或 HAL，见上文），换成另一个形态的驱动时先
+  `--remove` 再重新导入，避免两套规则同时在跑。
 
 ## 参考
 

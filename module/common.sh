@@ -13,11 +13,11 @@ MODNAME=panvk_swapper
 KO=""; KOOFF=""; KMI=""
 CONFIG_FILE="$MODDIR/config.conf"
 LOG_FILE="$MODDIR/panvk_swapper.log"
-CONFIG_KEYS="packages auto_start enabled hal_swap"
+CONFIG_KEYS="packages auto_start enabled"
 
 # PanVK 驱动载荷清单 (CI 打进 system 覆盖层; 手动安装见 install-panvk.sh)
 PAYLOADS_TSV="$MODDIR/system/etc/panvk/payloads.tsv"
-PAYLOAD_NAME=""; PAYLOAD_SO=""; PAYLOAD_JSON=""
+PAYLOAD_NAME=""; PAYLOAD_SO=""; PAYLOAD_JSON=""; PAYLOAD_SHAPE=""
 
 # 模块自带的兜底 ICD (手动放进 libvulkan_panvk.so 时用), 设备上可见路径为 /system/...
 PANVK_ICD_SYSTEM="/system/etc/panvk/icd.d/panvk.json"
@@ -77,7 +77,7 @@ config_set() {
 	key="$1"
 	value="$2"
 	case "$key" in
-		packages|auto_start|enabled|hal_swap) ;;
+		packages|auto_start|enabled) ;;
 		*) log "未知配置项: $key"; return 1 ;;
 	esac
 	tmp="$CONFIG_FILE.tmp.$$"
@@ -258,13 +258,16 @@ select_payload() {
 		PAYLOAD_NAME=$(printf '%s' "$line" | cut -f1)
 		PAYLOAD_SO=$(printf '%s' "$line" | cut -f2)
 		PAYLOAD_JSON=$(printf '%s' "$line" | cut -f3)
+		PAYLOAD_SHAPE=$(printf '%s' "$line" | cut -f5)
 	elif [ -f "$MODDIR/system/lib64/libvulkan_panvk.so" ]; then
 		PAYLOAD_NAME="manual"
 		PAYLOAD_SO="$PANVK_LIB_SYSTEM"
 		PAYLOAD_JSON="$PANVK_ICD_SYSTEM"
+		PAYLOAD_SHAPE="icd"
 	fi
 
 	[ -n "$PAYLOAD_JSON" ] || return 1
+	[ -n "$PAYLOAD_SHAPE" ] || PAYLOAD_SHAPE="icd"
 	# 载荷文件必须真的在模块目录里 (tsv 里存的是设备路径)
 	if [ ! -f "$MODDIR$PAYLOAD_SO" ]; then
 		log "载荷 $PAYLOAD_NAME 的文件不在模块里: $PAYLOAD_SO"
@@ -275,29 +278,32 @@ select_payload() {
 }
 
 # 由载荷拼出 ko 的重定向规则 (src|dst;src|dst)
+# 形态决定替换目标: ICD 载荷改 icd.d 的描述文件, HAL 载荷改 vulkan.<hw>.so。
+# 不能混着来 —— 把 HAL 库塞进 ICD 重定向会让 loader 加载失败,
+# 反过来把 ICD 库当成 HAL 也一样。
 build_rules() {
 	local rules d hwv
-	[ -n "$PAYLOAD_JSON" ] || return 1
 
-	rules=""
-	for d in /vendor/etc/vulkan/icd.d /system/etc/vulkan/icd.d /odm/etc/vulkan/icd.d; do
-		rules="${rules}${rules:+;}$d/*|$PAYLOAD_JSON"
-	done
-
-	# 可选: 连厂商 HAL 形态的 vulkan.<hw>.so 一起换掉 (载荷必须是 HAL 形态)
-	if [ "$(config_get hal_swap 0)" = "1" ] && [ -n "$PAYLOAD_SO" ]; then
+	if [ "$PAYLOAD_SHAPE" = "hal" ]; then
+		[ -n "$PAYLOAD_SO" ] || return 1
+		rules=""
 		hwv=$(getprop ro.hardware.vulkan 2>/dev/null)
-		[ -n "$hwv" ] && rules="$rules;/vendor/lib64/hw/vulkan.$hwv.so|$PAYLOAD_SO"
-		rules="$rules;/vendor/lib64/hw/vulkan.mali.so|$PAYLOAD_SO"
-	fi
-
-	# ko 的 rules 参数缓冲区有限, 超了就退回只用 ICD 规则
-	if [ ${#rules} -gt 480 ]; then
-		log "规则串过长 (${#rules} 字节), 只保留 ICD 规则"
+		if [ -n "$hwv" ] && [ "$hwv" != "mali" ]; then
+			rules="/vendor/lib64/hw/vulkan.$hwv.so|$PAYLOAD_SO"
+		fi
+		rules="${rules}${rules:+;}/vendor/lib64/hw/vulkan.mali.so|$PAYLOAD_SO"
+	else
+		[ -n "$PAYLOAD_JSON" ] || return 1
 		rules=""
 		for d in /vendor/etc/vulkan/icd.d /system/etc/vulkan/icd.d /odm/etc/vulkan/icd.d; do
 			rules="${rules}${rules:+;}$d/*|$PAYLOAD_JSON"
 		done
+	fi
+
+	# ko 的 rules 参数缓冲区是 1024 字节, 超了就直接放弃这一轮
+	if [ ${#rules} -gt 900 ]; then
+		log "规则串过长 (${#rules} 字节), 请换短一点的载荷名"
+		return 1
 	fi
 	printf '%s' "$rules"
 }

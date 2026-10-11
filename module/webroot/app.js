@@ -26,8 +26,6 @@ const els = {
 	noticeText: document.getElementById("noticeText"),
 	autoStartSwitch: document.getElementById("autoStartSwitch"),
 	autoStartHint: document.getElementById("autoStartHint"),
-	halSwapSwitch: document.getElementById("halSwapSwitch"),
-	halSwapHint: document.getElementById("halSwapHint"),
 	searchInput: document.getElementById("searchInput"),
 	sysToggle: document.getElementById("sysToggle"),
 	appList: document.getElementById("appList"),
@@ -153,7 +151,6 @@ function setBusy(isBusy) {
 	state.busy = isBusy;
 	els.toggleBtn.disabled = isBusy;
 	els.autoStartSwitch.disabled = isBusy;
-	els.halSwapSwitch.disabled = isBusy;
 	els.refreshLogsBtn.disabled = isBusy;
 	els.saveBtn.disabled = isBusy || !isDirty();
 }
@@ -227,7 +224,9 @@ function applyStatus(data) {
 		notices.push("模块里没有 PanVK 驱动, 先用 import-driver.sh 导入一个 .so 再启用。");
 		warn = true;
 	} else if (!warn) {
-		notices.push(`GPU ${gpu}, 当前载荷 ${payload} (共 ${data.payloads || "0"} 个)。`);
+		const shape = data.payload_shape === "hal" ? "HAL"
+			: data.payload_shape === "icd" ? "ICD" : "未知形态";
+		notices.push(`GPU ${gpu}, 当前载荷 ${payload} (${shape}, 共 ${data.payloads || "0"} 个)。`);
 	}
 	els.noticePanel.hidden = false;
 	els.noticePanel.classList.toggle("ok", !warn);
@@ -235,8 +234,6 @@ function applyStatus(data) {
 
 	els.autoStartSwitch.checked = data.auto_start === "1";
 	els.autoStartHint.textContent = data.auto_start === "1" ? "开启" : "关闭";
-	els.halSwapSwitch.checked = data.hal_swap === "1";
-	els.halSwapHint.textContent = data.hal_swap === "1" ? "开启" : "关闭";
 }
 
 function applySelectionFromStatus() {
@@ -555,10 +552,6 @@ els.saveBtn.addEventListener("click", () => {
 
 els.autoStartSwitch.addEventListener("change", (event) => {
 	void setFlag("auto_start", event.target.checked, els.autoStartSwitch);
-});
-
-els.halSwapSwitch.addEventListener("change", (event) => {
-	void setFlag("hal_swap", event.target.checked, els.halSwapSwitch);
 });
 
 els.searchInput.addEventListener("input", () => {
