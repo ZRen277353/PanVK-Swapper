@@ -4,6 +4,7 @@
 #include <jni.h>
 #include <android/log.h>
 #include <dlfcn.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -720,7 +721,8 @@ Java_com_zren_panvkprobe_ProbeNative_halReport(JNIEnv *env, jclass clazz)
 		"/vendor/lib64/hw/vulkan.kmgsl.so",
 	};
 	uint32_t i;
-	char real[512];
+	/* Android 的 FORTIFY 要求 realpath 的输出缓冲区 >= PATH_MAX */
+	char real[PATH_MAX];
 
 	(void)clazz;
 	g_off = 0;
