@@ -67,24 +67,18 @@ tools/                    # 主机端参数解析单元测试 (含最小内核�
 ## 安装与使用
 
 1. 下载 `PanVK-Swapper-all-kmi.zip`，在 KernelSU / SukiSU 里安装；
-2. 导入你自己的 PanVK 驱动（模块**不带**任何驱动二进制）：
+2. 导入你自己的 PanVK 驱动（模块**不带**任何驱动二进制），在 WebUI 的「驱动」面板里：
 
-   ```sh
-   # ICD 形态（导出 vk_icdGetInstanceProcAddr，替换 icd.d 里的描述文件）
-   sh /data/adb/modules/panvk_swapper/import-driver.sh /sdcard/libvulkan_panvk.so
+   * 填路径（或点「扫描」从 `/sdcard/Download`、`/sdcard`、`/data/local/tmp` 里挑），
+     可选填名字和 GPU 匹配，点「导入」；
+   * 导入会做 ELF/aarch64/共享库检查，并按导出接口自动识别形态
+     （有 `vk_icdGetInstanceProcAddr` 是 ICD；有 `HMI`/`HAL_MODULE_INFO_SYM` 是 HAL）；
+   * 列表里大字是名字、小字是完整文件名 + 形态 + 大小，用**单选圈**切换当前驱动；
+   * 驱动存在 `/data/adb/panvk/drivers/`（重装模块不会丢，卸载模块时会被清理），
+     选中的驱动会写进模块的 system 覆盖层，**重启一次**后才生效。
 
-   # HAL 形态（导出 HMI / HAL_MODULE_INFO_SYM，替换 /vendor/lib64/hw/vulkan.mali.so）
-   sh /data/adb/modules/panvk_swapper/import-driver.sh /sdcard/libvulkan_panfrost.so \
-       --name minegraph --gpu G610,G615,G710,G715,G720
-
-   sh /data/adb/modules/panvk_swapper/import-driver.sh --list
-   sh /data/adb/modules/panvk_swapper/import-driver.sh --remove mali-hal
-   ```
-
-   脚本会检查 ELF/aarch64/共享库，并按导出接口自动识别形态（`vk_icdGetInstanceProcAddr`
-   是 ICD，`HMI`/`HAL_MODULE_INFO_SYM` 是 HAL；识别不准时用 `--shape icd|hal` 覆盖），
-   然后放进模块的 `system/lib64/` 与 `system/etc/panvk/icd.d/`，登记到 `payloads.tsv`。
-   system 覆盖层在开机时挂载，所以**导入后要重启一次**；重启前 WebUI 会提示「需要重启」。
+   习惯命令行的话，同一套逻辑也有 CLI：`sh import-driver.sh <文件> [--name 名字] [--gpu 匹配]`、
+   `--list`、`--use 名字`、`--remove 名字`、`--scan`、`--apply`。
 
 3. 打开模块 WebUI：
    * 搜索 + 勾选需要替换驱动的应用，点「保存选择」；
@@ -102,21 +96,21 @@ G310/G510/G610/G615/G710/G715/G720/G925 等）。模块只负责：
 
 * 把驱动放进 `system/lib64/libvulkan_panvk-<name>.so`；
 * 生成指向它的 `system/etc/panvk/icd.d/panvk-<name>.json`；
-* 登记到 `system/etc/panvk/payloads.tsv`（名字、路径、`gpu_match`、来源）。
+* 驱动库存放在 `/data/adb/panvk/`（`drivers/<名字>.so` + `drivers.tsv` + `active`）。
 
 启用时会先识别设备 GPU（`/sys/kernel/gpu/gpu_model`、mali0 的 gpuinfo、dmesg 等），
 挑 `gpu_match` 命中的载荷（没写 `gpu_match` 或都没命中就用第一条），然后才把重定向规则
 写进内核模块。多个载荷可以共存，`--gpu` 用来给它们分工。
 
-替换哪条路径由载荷**形态**决定，两者不能混用：
+替换哪条路径由驱动**形态**决定，两者不能混用：
 
-* ICD 形态：改 `/vendor/etc/vulkan/icd.d/*` 等描述文件的加载路径，指向模块生成的
-  `panvk-<name>.json`；
+* ICD 形态：改 `/vendor/etc/vulkan/icd.d/*` 等描述文件的加载路径，指向模块自带的
+  `/system/etc/panvk/icd.d/panvk.json`（其 `library_path` 就是下面那个固定路径）；
 * HAL 形态：改 `/vendor/lib64/hw/vulkan.<ro.hardware.vulkan>.so`（通常就是
-  `vulkan.mali.so`）的加载路径，直接指向驱动本体。
+  `vulkan.mali.so`）的加载路径，指向 `/system/lib64/libvulkan_panvk.so`。
 
-把 HAL 库挂到 ICD 描述上（或反过来）loader 只会加载失败，所以形态是自动判定并在
-`--list` 里显示的。
+两种形态最终都落到同一个 `/system/lib64/libvulkan_panvk.so`，所以切换驱动只要换文件 + 重启。
+把 HAL 库挂到 ICD 描述上（或反过来）loader 只会加载失败，所以形态是自动判定的。
 
 ## 内核模块参数
 
@@ -146,8 +140,8 @@ G310/G510/G610/G615/G710/G715/G720/G925 等）。模块只负责：
 * 只影响"打开文件"这条路径，已经打开的 fd 不会被换掉，因此需要重启目标应用；
 * 驱动能不能跑起来取决于载荷是否匹配你的 GPU 世代（JM v9 / CSF v10+）和你设备的 kbase 版本；
   这些 kbase 移植都还在实验阶段，遇到异常先看日志、换载荷再试；
-* 替换目标由载荷形态决定（ICD 或 HAL，见上文），换成另一个形态的驱动时先
-  `--remove` 再重新导入，避免两套规则同时在跑。
+* 替换目标由驱动形态决定（ICD 或 HAL，见上文），换另一个形态的驱动时直接在列表里
+  选中就行，旧规则会被新的替换掉。
 
 ## 参考
 

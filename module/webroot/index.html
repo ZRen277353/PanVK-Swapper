@@ -25,8 +25,32 @@
 		</section>
 
 		<section class="panel notice" id="noticePanel" hidden>
-			<h2>驱动</h2>
+			<h2>状态</h2>
 			<p id="noticeText"></p>
+		</section>
+
+		<section class="panel">
+			<div class="section-head">
+				<h2>驱动</h2>
+				<span id="storePath" class="count"></span>
+			</div>
+			<div id="driverList" class="driver-list" role="radiogroup" aria-label="已导入的驱动"></div>
+			<div class="driver-foot">
+				<p id="driverHint" class="muted">正在读取...</p>
+				<button id="applyDriverBtn" class="secondary" type="button">重新应用</button>
+			</div>
+			<div class="driver-import">
+				<input id="importPath" class="search" type="text" placeholder="驱动文件路径, 如 /sdcard/Download/libvulkan_panfrost.so" autocomplete="off" spellcheck="false" aria-label="驱动文件路径">
+				<div class="import-row">
+					<input id="importName" class="search" type="text" placeholder="名字 (可选)" autocomplete="off" spellcheck="false" aria-label="驱动名字">
+					<input id="importGpu" class="search" type="text" placeholder="GPU 匹配 (可选, 如 G610,G615)" autocomplete="off" spellcheck="false" aria-label="GPU 匹配">
+				</div>
+				<div class="import-actions">
+					<button id="scanBtn" class="secondary" type="button">扫描</button>
+					<button id="importBtn" class="primary" type="button">导入</button>
+				</div>
+				<div id="scanList" class="scan-list" hidden></div>
+			</div>
 		</section>
 
 		<section class="panel">

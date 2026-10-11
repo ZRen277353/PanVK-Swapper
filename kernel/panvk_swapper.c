@@ -372,4 +372,4 @@ module_exit(ps_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("ZRen277353");
 MODULE_DESCRIPTION("按 UID 把用户层图形驱动替换为 PanVK 开源驱动");
-MODULE_VERSION("0.1.2");
+MODULE_VERSION("0.1.3");

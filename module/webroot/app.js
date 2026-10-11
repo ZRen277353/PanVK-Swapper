@@ -16,6 +16,7 @@ const state = {
 	busy: false,
 	filterSystem: false,
 	hasAppInfo: true,
+	drivers: [],
 };
 
 const els = {
@@ -34,6 +35,16 @@ const els = {
 	saveBtn: document.getElementById("saveBtn"),
 	refreshLogsBtn: document.getElementById("refreshLogsBtn"),
 	logBox: document.getElementById("logBox"),
+	driverList: document.getElementById("driverList"),
+	driverHint: document.getElementById("driverHint"),
+	storePath: document.getElementById("storePath"),
+	importPath: document.getElementById("importPath"),
+	importName: document.getElementById("importName"),
+	importGpu: document.getElementById("importGpu"),
+	importBtn: document.getElementById("importBtn"),
+	scanBtn: document.getElementById("scanBtn"),
+	scanList: document.getElementById("scanList"),
+	applyDriverBtn: document.getElementById("applyDriverBtn"),
 	toast: document.getElementById("toast"),
 };
 
@@ -153,6 +164,9 @@ function setBusy(isBusy) {
 	els.autoStartSwitch.disabled = isBusy;
 	els.refreshLogsBtn.disabled = isBusy;
 	els.saveBtn.disabled = isBusy || !isDirty();
+	els.importBtn.disabled = isBusy;
+	els.scanBtn.disabled = isBusy;
+	els.applyDriverBtn.disabled = isBusy;
 }
 
 function isDirty() {
@@ -177,11 +191,11 @@ function applyStatus(data) {
 	const enabled = data.enabled === "1";
 	const loaded = data.loaded === "1";
 	const available = data.available === "1";
-	const payloadPresent = data.payload_present === "1";
+	const driverPresent = data.driver_present === "1";
+	const driverApplied = data.driver_applied === "1";
 	const count = data.count || "0";
 	const redirects = data.redirects || "0";
 	const gpu = data.gpu || "未识别";
-	const payload = data.payload || "无";
 
 	els.statePill.classList.remove("on", "off", "warn");
 	if (enabled && loaded && available) {
@@ -220,13 +234,19 @@ function applyStatus(data) {
 		notices.push("刚导入的驱动要重启一次才会挂进 /system, 重启后再启用。");
 		warn = true;
 	}
-	if (!payloadPresent) {
-		notices.push("模块里没有 PanVK 驱动, 先用 import-driver.sh 导入一个 .so 再启用。");
+	if (!driverPresent) {
+		notices.push("还没有导入驱动, 在下面的「驱动」面板里导入一个 .so。");
+		warn = true;
+	} else if (!driverApplied) {
+		notices.push(`驱动 ${data.driver} 还没应用, 在驱动列表里选中它 (选中后需要重启一次)。`);
+		warn = true;
+	} else if (data.pending_reboot === "1") {
+		notices.push("驱动刚换过, 重启一次后生效。");
 		warn = true;
 	} else if (!warn) {
-		const shape = data.payload_shape === "hal" ? "HAL"
-			: data.payload_shape === "icd" ? "ICD" : "未知形态";
-		notices.push(`GPU ${gpu}, 当前载荷 ${payload} (${shape}, 共 ${data.payloads || "0"} 个)。`);
+		const shape = data.driver_shape === "hal" ? "HAL"
+			: data.driver_shape === "icd" ? "ICD" : "未知形态";
+		notices.push(`GPU ${gpu}, 当前驱动 ${data.driver} (${shape}, 共 ${data.driver_count || "0"} 个)。`);
 	}
 	els.noticePanel.hidden = false;
 	els.noticePanel.classList.toggle("ok", !warn);
@@ -234,6 +254,8 @@ function applyStatus(data) {
 
 	els.autoStartSwitch.checked = data.auto_start === "1";
 	els.autoStartHint.textContent = data.auto_start === "1" ? "开启" : "关闭";
+
+	els.storePath.textContent = data.store || "";
 }
 
 function applySelectionFromStatus() {
@@ -280,35 +302,90 @@ async function loadApps() {
 	renderApps();
 }
 
-/* 新版 KernelSU WebUI 提供 listPackages/getPackagesInfo, 能拿到软件名、系统标记和 uid */
+/* 新版 KernelSU WebUI 提供 listPackages/getPackagesInfo, 能拿到软件名、系统标记和 uid。
+   注意: 有的版本这两个接口收发的是 JSON 字符串而不是数组, 这里两种都兼容。 */
+function packageApi() {
+	const k = window.ksu || {};
+	return {
+		listPackages: typeof k.listPackages === "function" ? k.listPackages.bind(k)
+			: (typeof window.listPackages === "function" ? window.listPackages : null),
+		getPackagesInfo: typeof k.getPackagesInfo === "function" ? k.getPackagesInfo.bind(k)
+			: (typeof window.getPackagesInfo === "function" ? window.getPackagesInfo : null),
+	};
+}
+
 function hasPackageApi() {
-	return !!(window.ksu
-		&& typeof window.ksu.listPackages === "function"
-		&& typeof window.ksu.getPackagesInfo === "function");
+	const a = packageApi();
+	return !!(a.listPackages && a.getPackagesInfo);
+}
+
+/* 结果可能是数组, 也可能是 "[a,b]" 这种字符串 */
+function parseMaybeJson(value) {
+	if (Array.isArray(value)) {
+		return value;
+	}
+	if (typeof value === "string") {
+		try {
+			const parsed = JSON.parse(value);
+			if (Array.isArray(parsed)) {
+				return parsed;
+			}
+		} catch (error) {
+			/* 退回下面按逗号切 */
+		}
+		return value.replace(/[[\]"]/g, "").split(",").map((s) => s.trim()).filter(Boolean);
+	}
+	return [];
+}
+
+/* 入参先试 JSON 字符串 (新版), 不行再试数组 (旧版) */
+function callPackagesInfo(fn, names) {
+	try {
+		const out = parseMaybeJson(fn(JSON.stringify(names)));
+		if (out.length) {
+			return out;
+		}
+	} catch (error) {
+		/* 试数组 */
+	}
+	try {
+		return parseMaybeJson(fn(names));
+	} catch (error) {
+		return [];
+	}
 }
 
 async function loadAppsFromApi() {
-	const names = window.ksu.listPackages("all") || [];
+	const a = packageApi();
+	let names = parseMaybeJson(a.listPackages("all"));
+	if (!names.length) {
+		names = parseMaybeJson(a.listPackages("user"));
+	}
 	if (!names.length) {
 		return 0;
 	}
 
-	const apps = [];
-	const chunk = 200;
-	for (let i = 0; i < names.length; i += chunk) {
-		const infos = window.ksu.getPackagesInfo(names.slice(i, i + chunk)) || [];
-		for (const info of infos) {
-			if (!info || !info.packageName) {
-				continue;
-			}
-			apps.push({
-				name: info.packageName,
-				label: info.appLabel || info.packageName,
-				uid: info.uid === undefined || info.uid === null ? "" : String(info.uid),
-				system: !!info.isSystem,
-				icon: true,
-			});
+	let infos = callPackagesInfo(a.getPackagesInfo, names);
+	if (!infos.length) {
+		/* 一次性传入失败时按块重试 */
+		const chunk = 120;
+		for (let i = 0; i < names.length; i += chunk) {
+			infos = infos.concat(callPackagesInfo(a.getPackagesInfo, names.slice(i, i + chunk)));
 		}
+	}
+
+	const apps = [];
+	for (const info of infos) {
+		if (!info || !info.packageName) {
+			continue;
+		}
+		apps.push({
+			name: info.packageName,
+			label: info.appLabel || info.packageName,
+			uid: info.uid === undefined || info.uid === null ? "" : String(info.uid),
+			system: !!info.isSystem,
+			icon: true,
+		});
 	}
 	state.apps = apps;
 	return apps.length;
@@ -464,10 +541,205 @@ function updateSelectionUi() {
 /* 操作                                                                */
 /* ------------------------------------------------------------------ */
 
+/* ---------------------------- 驱动库 ------------------------------ */
+
+async function loadDrivers() {
+	const result = await run("drivers");
+	const drivers = [];
+	for (const line of result.stdout.split(/\r?\n/)) {
+		if (!line.trim()) {
+			continue;
+		}
+		const f = line.split("\t");
+		if (f.length < 5) {
+			continue;
+		}
+		drivers.push({
+			name: f[0],
+			shape: f[1],
+			gpu: f[2],
+			orig: f[3],
+			size: f[4],
+			active: f[5] === "1",
+			applied: f[6] === "1",
+		});
+	}
+	state.drivers = drivers;
+	renderDrivers();
+}
+
+function formatSize(text) {
+	const n = Number(text);
+	if (!isFinite(n) || n <= 0) {
+		return text || "-";
+	}
+	return `${(n / 1048576).toFixed(1)} MB`;
+}
+
+function renderDrivers() {
+	const fragment = document.createDocumentFragment();
+	if (!state.drivers.length) {
+		const empty = document.createElement("div");
+		empty.className = "driver-empty";
+		empty.textContent = "还没有导入驱动, 在下面填路径导入一个 .so";
+		fragment.appendChild(empty);
+	}
+
+	for (const d of state.drivers) {
+		const row = document.createElement("label");
+		row.className = "driver-row" + (d.active ? " active" : "");
+
+		const radio = document.createElement("input");
+		radio.type = "radio";
+		radio.name = "driver";
+		radio.className = "driver-radio";
+		radio.checked = d.active;
+		radio.addEventListener("change", () => {
+			if (radio.checked) {
+				void selectDriver(d.name);
+			}
+		});
+
+		const meta = document.createElement("span");
+		meta.className = "driver-meta";
+		const title = document.createElement("span");
+		title.className = "driver-name";
+		title.textContent = d.name;
+		const sub = document.createElement("span");
+		sub.className = "driver-sub";
+		const bits = [d.orig || "-", (d.shape || "?").toUpperCase(), formatSize(d.size)];
+		if (d.gpu && d.gpu !== "-") {
+			bits.push(d.gpu);
+		}
+		sub.textContent = bits.join(" · ");
+		meta.appendChild(title);
+		meta.appendChild(sub);
+
+		const tag = document.createElement("span");
+		tag.className = "tag";
+		tag.textContent = d.active ? (d.applied ? "使用中" : "待重启") : (d.applied ? "已应用" : ""); 
+
+		const del = document.createElement("button");
+		del.type = "button";
+		del.className = "mini-btn";
+		del.textContent = "删除";
+		del.title = `删除驱动 ${d.name}`;
+		del.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			void removeDriver(d.name, d.active);
+		});
+
+		row.appendChild(radio);
+		row.appendChild(meta);
+		row.appendChild(tag);
+		row.appendChild(del);
+		fragment.appendChild(row);
+	}
+	els.driverList.replaceChildren(fragment);
+
+	const active = state.drivers.find((d) => d.active);
+	if (!state.drivers.length) {
+		els.driverHint.textContent = "导入后按单选选中要用的那个, 选中会写入 /system, 需要重启一次生效";
+	} else if (!active) {
+		els.driverHint.textContent = "还没有选中驱动, 点左边单选圈选一个";
+	} else if (active.applied) {
+		els.driverHint.textContent = `当前使用 ${active.name}; 换驱动后需要重启一次`;
+	} else {
+		els.driverHint.textContent = `${active.name} 已选中但还没生效, 重启后生效`;
+	}
+}
+
+async function withRefresh(fn, successText) {
+	if (state.busy) {
+		return;
+	}
+	setBusy(true);
+	try {
+		const result = await fn();
+		showToast((result && result.stdout ? result.stdout.trim() : "") || successText);
+		await refreshStatus().catch(() => {});
+		await loadDrivers().catch(() => {});
+		await refreshLogs().catch(() => {});
+	} catch (error) {
+		showToast(error.message, true);
+		await refreshStatus().catch(() => {});
+		await loadDrivers().catch(() => {});
+	} finally {
+		setBusy(false);
+	}
+}
+
+function selectDriver(name) {
+	return withRefresh(() => run(`driver-select '${name}'`), "已选中");
+}
+
+function removeDriver(name, wasActive) {
+	const hint = wasActive
+		? `删除正在使用的驱动 ${name}? 删除后需要重新选一个并重启。`
+		: `删除驱动 ${name}?`;
+	if (!window.confirm(hint)) {
+		return Promise.resolve();
+	}
+	return withRefresh(() => run(`driver-remove '${name}'`), "已删除");
+}
+
+function importDriver() {
+	const path = els.importPath.value.trim();
+	if (!path) {
+		showToast("先填驱动文件路径, 或点扫描选一个", true);
+		return Promise.resolve();
+	}
+	const name = els.importName.value.trim();
+	const gpu = els.importGpu.value.trim();
+	return withRefresh(async () => {
+		const result = await run(`driver-import '${path}' '${name}' '${gpu}'`);
+		els.importPath.value = "";
+		els.importName.value = "";
+		els.importGpu.value = "";
+		return result;
+	}, "已导入");
+}
+
+function applyDriver() {
+	return withRefresh(() => run("driver-apply"), "已应用");
+}
+
+async function scanDrivers() {
+	if (state.busy) {
+		return;
+	}
+	setBusy(true);
+	try {
+		const result = await run("driver-scan");
+		const files = result.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+		const fragment = document.createDocumentFragment();
+		for (const file of files) {
+			const chip = document.createElement("button");
+			chip.type = "button";
+			chip.className = "chip";
+			chip.textContent = file;
+			chip.title = "点击填入上面的路径";
+			chip.addEventListener("click", () => {
+				els.importPath.value = file;
+			});
+			fragment.appendChild(chip);
+		}
+		els.scanList.replaceChildren(fragment);
+		els.scanList.hidden = !files.length;
+		showToast(files.length ? `找到 ${files.length} 个 .so, 点一下填入路径` : "常见目录里没找到 .so");
+	} catch (error) {
+		showToast(error.message, true);
+	} finally {
+		setBusy(false);
+	}
+}
+
 async function refreshAll(showError = true) {
 	setBusy(true);
 	try {
 		await refreshStatus();
+		await loadDrivers();
 		await refreshLogs();
 	} catch (error) {
 		if (showError) {
@@ -508,7 +780,7 @@ async function saveSelection() {
 		const csv = Array.from(state.selected).sort().join(",");
 		await run(`set packages '${csv}'`);
 		state.saved = new Set(state.selected);
-		const result = await run("apply");
+		const result = await run("apps-apply");
 		showToast(result.stdout.trim() || "选择已保存");
 		await refreshStatus();
 		await refreshLogs();
@@ -567,6 +839,18 @@ els.refreshLogsBtn.addEventListener("click", () => {
 	void refreshAll();
 });
 
+els.importBtn.addEventListener("click", () => {
+	void importDriver();
+});
+
+els.scanBtn.addEventListener("click", () => {
+	void scanDrivers();
+});
+
+els.applyDriverBtn.addEventListener("click", () => {
+	void applyDriver();
+});
+
 document.addEventListener("visibilitychange", () => {
 	if (!document.hidden) {
 		void refreshAll(false);
@@ -599,6 +883,7 @@ async function boot() {
 		MODDIR = await resolveModuleDir();
 		await refreshStatus();
 		applySelectionFromStatus();
+		await loadDrivers();
 		await loadApps();
 		applySelectionFromStatus();
 		await refreshLogs();

@@ -9,7 +9,9 @@ esac
 . "$MODDIR/common.sh"
 
 usage() {
-	echo "usage: control.sh {status|apps|set <key> <value>|apply|start|stop|toggle|rules|logs|clearlog}"
+	echo "usage: control.sh {status|apps|set <key> <value>|apps-apply|start|stop|toggle|rules|logs|clearlog"
+	echo "                     |drivers|driver-scan|driver-import <path> [name] [gpu] [force]"
+	echo "                     |driver-select <name>|driver-remove <name>|driver-apply}"
 }
 
 status_output() {
@@ -34,25 +36,31 @@ status_output() {
 	echo "kernel=$(uname -r)"
 	echo "target_kmi=$KMI"
 	echo "gpu=$(detect_gpu)"
-	if [ -f "$PAYLOADS_TSV" ]; then
-		echo "payloads=$(grep -c . "$PAYLOADS_TSV" 2>/dev/null || echo 0)"
+	echo "store=$STORE_DIR"
+	if [ -f "$REGISTRY" ]; then
+		echo "driver_count=$(grep -c . "$REGISTRY" 2>/dev/null || echo 0)"
 	else
-		echo "payloads=0"
+		echo "driver_count=0"
 	fi
-	if select_payload; then
-		echo "payload=$PAYLOAD_NAME"
-		echo "payload_shape=$PAYLOAD_SHAPE"
-		echo "payload_so=$PAYLOAD_SO"
-		echo "payload_json=$PAYLOAD_JSON"
-		echo "payload_present=1"
+	if select_driver; then
+		echo "driver=$DRIVER_NAME"
+		echo "driver_shape=$DRIVER_SHAPE"
+		echo "driver_orig=$DRIVER_ORIG"
+		echo "driver_gpu=$DRIVER_GPU"
+		echo "driver_present=1"
 	else
-		echo "payload="
-		echo "payload_shape="
-		echo "payload_so="
-		echo "payload_json="
-		echo "payload_present=0"
+		echo "driver="
+		echo "driver_shape="
+		echo "driver_orig="
+		echo "driver_gpu="
+		echo "driver_present=0"
 	fi
-	if [ -f "$MODDIR/pending-reboot" ]; then echo "pending_reboot=1"; else echo "pending_reboot=0"; fi
+	if [ "$(applied_name)" = "$(active_name)" ] && [ -n "$(active_name)" ] && [ -f "$TARGET_SO_MOD" ]; then
+		echo "driver_applied=1"
+	else
+		echo "driver_applied=0"
+	fi
+	if needs_reboot; then echo "pending_reboot=1"; else echo "pending_reboot=0"; fi
 	echo "module_dir=$MODDIR"
 }
 
@@ -107,13 +115,40 @@ rules_output() {
 	if loaded; then
 		ko_param rules 2>/dev/null | tr ';' '\n'
 	else
-		if select_payload; then
+		if select_driver; then
 			echo "ko 未加载, 按当前配置将要下发的规则:"
 			build_rules 2>/dev/null | tr ';' '\n'
 		else
-			echo "模块里没有 PanVK 驱动载荷"
+			echo "还没有导入驱动"
 		fi
 	fi
+}
+
+# WebUI 驱动面板用: 列表 / 扫描 / 导入 / 选中 / 删除 / 重新应用
+driver_commands() {
+	case "$1" in
+		drivers)
+			driver_list
+			;;
+		driver-scan)
+			driver_scan
+			;;
+		driver-import)
+			[ -n "$2" ] || { log "缺少文件路径"; exit 1; }
+			driver_import "$2" "${3:-}" "${4:-}" "${5:-0}" || exit 1
+			;;
+		driver-select)
+			[ -n "$2" ] || { log "缺少驱动名"; exit 1; }
+			driver_select "$2" || exit 1
+			;;
+		driver-remove)
+			[ -n "$2" ] || { log "缺少驱动名"; exit 1; }
+			driver_remove "$2" || exit 1
+			;;
+		driver-apply)
+			driver_apply || exit 1
+			;;
+	esac
 }
 
 logs_output() {
@@ -139,8 +174,11 @@ case "$1" in
 		[ -n "$2" ] && [ -n "$3" ] || { usage; exit 1; }
 		config_set "$2" "$3" || exit 1
 		;;
-	apply)
+	apps-apply|apply)
 		apply_module
+		;;
+	drivers|driver-scan|driver-import|driver-select|driver-remove|driver-apply)
+		driver_commands "$@"
 		;;
 	start)
 		start_module

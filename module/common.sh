@@ -15,13 +15,20 @@ CONFIG_FILE="$MODDIR/config.conf"
 LOG_FILE="$MODDIR/panvk_swapper.log"
 CONFIG_KEYS="packages auto_start enabled"
 
-# PanVK 驱动载荷清单 (CI 打进 system 覆盖层; 手动安装见 install-panvk.sh)
-PAYLOADS_TSV="$MODDIR/system/etc/panvk/payloads.tsv"
-PAYLOAD_NAME=""; PAYLOAD_SO=""; PAYLOAD_JSON=""; PAYLOAD_SHAPE=""
+# 驱动库放在模块目录之外: 重装模块不丢, 卸载模块时由 uninstall.sh 清掉
+STORE_DIR="${PANVK_STORE:-/data/adb/panvk}"
+DRIVERS_DIR="$STORE_DIR/drivers"
+REGISTRY="$STORE_DIR/drivers.tsv"
+ACTIVE_FILE="$STORE_DIR/active"
+APPLIED_FILE="$MODDIR/applied"
+PENDING="$MODDIR/pending-reboot"
 
-# 模块自带的兜底 ICD (手动放进 libvulkan_panvk.so 时用), 设备上可见路径为 /system/...
-PANVK_ICD_SYSTEM="/system/etc/panvk/icd.d/panvk.json"
-PANVK_LIB_SYSTEM="/system/lib64/libvulkan_panvk.so"
+# 生效路径固定成这两个, WebUI / 规则 / ICD 描述都只认它
+TARGET_SO_DEV="/system/lib64/libvulkan_panvk.so"
+TARGET_JSON_DEV="/system/etc/panvk/icd.d/panvk.json"
+TARGET_SO_MOD="$MODDIR/system/lib64/libvulkan_panvk.so"
+
+DRIVER_NAME=""; DRIVER_SHAPE=""; DRIVER_SRC=""; DRIVER_GPU=""; DRIVER_ORIG=""
 
 # KSU/SukiSU/Magisk 自带的 busybox
 BB=""
@@ -208,7 +215,7 @@ rewrite_ko_vermagic() {
 }
 
 # ------------------------------------------------------------------ #
-# PanVK 驱动载荷                                                      #
+# PanVK 驱动库 (持久存放在 /data/adb/panvk, 不随模块重装丢失)          #
 # ------------------------------------------------------------------ #
 
 # 尽力识别 Mali GPU 型号, 只用于选载荷和展示
@@ -230,79 +237,224 @@ detect_gpu() {
 	getprop ro.hardware.vulkan 2>/dev/null
 }
 
-# 按 GPU 选载荷: gpu_match 命中优先, 否则用第一条; 都拿不到时回退到手动载荷
-select_payload() {
-	local line gpu
-	PAYLOAD_NAME=""; PAYLOAD_SO=""; PAYLOAD_JSON=""
+# ELF 头里第 n 个字节 (十进制)
+elf_byte() {
+	dd if="$1" bs=1 skip="$2" count=1 2>/dev/null | od -An -tu1 2>/dev/null | tr -d ' '
+}
 
-	if [ -f "$PAYLOADS_TSV" ]; then
-		gpu=$(detect_gpu)
-		line=$(awk -F'\t' -v gpu="$gpu" '
-			{ n++; if (n == 1) first = $0
-			  if (sel == "") {
-			      if ($4 == "") { sel = $0 }
-			      else {
-			          cnt = split($4, pats, ",")
-			          up = toupper(gpu)
-			          for (i = 1; i <= cnt; i++) {
-			              p = toupper(pats[i])
-			              if (p != "" && index(up, p) > 0) { sel = $0; break }
-			          }
-			      }
-			  } }
-			END { if (sel == "") print first; else print sel }
-		' "$PAYLOADS_TSV")
-	fi
-
-	if [ -n "$line" ]; then
-		PAYLOAD_NAME=$(printf '%s' "$line" | cut -f1)
-		PAYLOAD_SO=$(printf '%s' "$line" | cut -f2)
-		PAYLOAD_JSON=$(printf '%s' "$line" | cut -f3)
-		PAYLOAD_SHAPE=$(printf '%s' "$line" | cut -f5)
-	elif [ -f "$MODDIR/system/lib64/libvulkan_panvk.so" ]; then
-		PAYLOAD_NAME="manual"
-		PAYLOAD_SO="$PANVK_LIB_SYSTEM"
-		PAYLOAD_JSON="$PANVK_ICD_SYSTEM"
-		PAYLOAD_SHAPE="icd"
-	fi
-
-	[ -n "$PAYLOAD_JSON" ] || return 1
-	[ -n "$PAYLOAD_SHAPE" ] || PAYLOAD_SHAPE="icd"
-	# 载荷文件必须真的在模块目录里 (tsv 里存的是设备路径)
-	if [ ! -f "$MODDIR$PAYLOAD_SO" ]; then
-		log "载荷 $PAYLOAD_NAME 的文件不在模块里: $PAYLOAD_SO"
-		PAYLOAD_NAME=""; PAYLOAD_SO=""; PAYLOAD_JSON=""
-		return 1
-	fi
+# aarch64 共享库检查
+driver_elf_ok() {
+	f="$1"
+	magic=$(dd if="$f" bs=1 count=4 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
+	[ "$magic" = "7f454c46" ] || return 1
+	b0=$(elf_byte "$f" 16); b1=$(elf_byte "$f" 17)
+	[ -n "$b0" ] && [ -n "$b1" ] || return 1
+	[ $((b0 + b1 * 256)) = "3" ] || return 1
+	b0=$(elf_byte "$f" 18); b1=$(elf_byte "$f" 19)
+	[ -n "$b0" ] && [ -n "$b1" ] || return 1
+	[ $((b0 + b1 * 256)) = "183" ] || return 1
 	return 0
 }
 
-# 由载荷拼出 ko 的重定向规则 (src|dst;src|dst)
-# 形态决定替换目标: ICD 载荷改 icd.d 的描述文件, HAL 载荷改 vulkan.<hw>.so。
-# 不能混着来 —— 把 HAL 库塞进 ICD 重定向会让 loader 加载失败,
-# 反过来把 ICD 库当成 HAL 也一样。
+# 形态: icd (有 ICD 接口) / hal (有 HAL 模块标记) / unknown
+driver_shape() {
+	f="$1"
+	if grep -q 'vk_icdGetInstanceProcAddr' "$f" 2>/dev/null; then
+		printf 'icd'
+	elif grep -q 'HAL_MODULE_INFO_SYM' "$f" 2>/dev/null || grep -q 'HMI' "$f" 2>/dev/null; then
+		printf 'hal'
+	else
+		printf 'unknown'
+	fi
+}
+
+# 文件名 -> 合法驱动名 (小写, 非法字符换 -)
+sanitize_name() {
+	printf '%s' "$1" | tr 'A-Z' 'a-z' |
+		sed -e 's/\.so$//' -e 's/^lib//' -e 's/[^a-z0-9]\+/-/g' -e 's/^-*//' -e 's/-*$//'
+}
+
+# drivers.tsv: name / shape / gpu_match / 原始文件名 / 大小 / 导入时间
+registry_get() {
+	[ -f "$REGISTRY" ] || return 1
+	awk -F'\t' -v n="$1" '$1 == n { print; exit }' "$REGISTRY"
+}
+
+registry_upsert() {
+	mkdir -p "$DRIVERS_DIR" || return 1
+	tmp="$REGISTRY.tmp.$$"
+	{
+		[ -f "$REGISTRY" ] && awk -F'\t' -v n="$1" '$1 != n' "$REGISTRY"
+		printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" \
+			"$(date '+%Y-%m-%d %H:%M' 2>/dev/null || echo '-')"
+	} > "$tmp" && mv "$tmp" "$REGISTRY"
+}
+
+registry_drop() {
+	[ -f "$REGISTRY" ] || return 0
+	tmp="$REGISTRY.tmp.$$"
+	awk -F'\t' -v n="$1" '$1 != n' "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+	[ -s "$REGISTRY" ] || rm -f "$REGISTRY"
+	return 0
+}
+
+active_name() {
+	[ -f "$ACTIVE_FILE" ] && head -n 1 "$ACTIVE_FILE" 2>/dev/null | tr -d '\r\n'
+}
+
+set_active() {
+	mkdir -p "$STORE_DIR" || return 1
+	printf '%s\n' "$1" > "$ACTIVE_FILE"
+}
+
+applied_name() {
+	[ -f "$APPLIED_FILE" ] && head -n 1 "$APPLIED_FILE" 2>/dev/null | tr -d '\r\n'
+}
+
+needs_reboot() {
+	[ -f "$PENDING" ]
+}
+
+# 选中当前生效的驱动 -> DRIVER_*
+select_driver() {
+	local name line
+
+	DRIVER_NAME=""; DRIVER_SHAPE=""; DRIVER_SRC=""; DRIVER_GPU=""; DRIVER_ORIG=""
+	name=$(active_name)
+	[ -n "$name" ] || return 1
+	line=$(registry_get "$name") || return 1
+	[ -n "$line" ] || return 1
+
+	DRIVER_NAME=$(printf '%s' "$line" | cut -f1)
+	DRIVER_SHAPE=$(printf '%s' "$line" | cut -f2)
+	DRIVER_GPU=$(printf '%s' "$line" | cut -f3)
+	DRIVER_ORIG=$(printf '%s' "$line" | cut -f4)
+	DRIVER_SRC="$DRIVERS_DIR/$DRIVER_NAME.so"
+	[ -n "$DRIVER_SHAPE" ] || DRIVER_SHAPE="icd"
+	[ -f "$DRIVER_SRC" ] || { log "驱动文件不存在: $DRIVER_SRC"; return 1; }
+	return 0
+}
+
+# WebUI 列表: name / shape / gpu / 原始文件名 / 大小 / 选中 / 已应用
+driver_list() {
+	local act app
+	[ -f "$REGISTRY" ] || return 0
+	act=$(active_name); app=$(applied_name)
+	awk -F'\t' -v act="$act" -v app="$app" '{
+		printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, ($3 == "" ? "-" : $3), $4, $5,
+			($1 == act ? "1" : "0"), ($1 == app ? "1" : "0")
+	}' "$REGISTRY"
+}
+
+# 常见目录里扫一遍可导入的 .so
+driver_scan() {
+	for d in /sdcard/Download /sdcard/Download/panvk /sdcard/panvk /sdcard /data/local/tmp; do
+		[ -d "$d" ] || continue
+		find "$d" -maxdepth 2 -type f -name '*.so' 2>/dev/null
+	done | sort -u | head -n 60
+}
+
+# driver_import <文件> [名字] [gpu_match] [force]
+driver_import() {
+	src="$1"; name="$2"; gpu="$3"; force="${4:-0}"
+	size=""
+
+	[ -n "$src" ] || { log "缺少驱动文件路径"; return 1; }
+	[ -f "$src" ] || { log "文件不存在: $src"; return 1; }
+	driver_elf_ok "$src" || { log "不是 aarch64 共享库: $src"; return 1; }
+
+	shape=$(driver_shape "$src")
+	if [ "$shape" = "unknown" ] && [ "$force" != "1" ]; then
+		log "既没有 ICD 接口也没有 HAL 标记, 不像图形驱动 (确认无误可以强制导入)"
+		return 1
+	fi
+	[ "$shape" = "unknown" ] && shape="icd"
+
+	[ -n "$name" ] || name=$(sanitize_name "$(basename "$src")")
+	[ -n "$name" ] || name="driver"
+	case "$name" in
+		*[!a-z0-9-]*) log "驱动名只能用小写字母/数字/短横线: $name"; return 1 ;;
+	esac
+
+	mkdir -p "$DRIVERS_DIR" || return 1
+	cp -f "$src" "$DRIVERS_DIR/$name.so" || { log "拷贝失败 (空间不足?)"; return 1; }
+	chmod 0644 "$DRIVERS_DIR/$name.so"
+	size=$(stat -c %s "$DRIVERS_DIR/$name.so" 2>/dev/null || echo "?")
+	registry_upsert "$name" "$shape" "${gpu:-}" "$(basename "$src")" "$size" || return 1
+	# 刚导入的驱动直接选中, 方便"导入即使用"
+	set_active "$name"
+	log "已导入驱动 $name ($shape, $(basename "$src"), $size 字节)"
+	return 0
+}
+
+# 把选中的驱动落进模块 system 覆盖层 (固定路径), 需要重启生效
+driver_apply() {
+	select_driver || { log "还没有可用的驱动, 先导入一个"; return 1; }
+	mkdir -p "$MODDIR/system/lib64" || return 1
+	cp -f "$DRIVER_SRC" "$TARGET_SO_MOD" || { log "写入模块目录失败 (空间不足?)"; return 1; }
+	chmod 0644 "$TARGET_SO_MOD"
+	printf '%s\n' "$DRIVER_NAME" > "$APPLIED_FILE"
+	touch "$PENDING"
+	log "已应用驱动 $DRIVER_NAME [$DRIVER_SHAPE], 重启后生效"
+	return 0
+}
+
+driver_select() {
+	name="$1"
+	[ -n "$name" ] || { log "缺少驱动名"; return 1; }
+	registry_get "$name" >/dev/null || { log "没有这个驱动: $name"; return 1; }
+	set_active "$name" || return 1
+	driver_apply || return 1
+	return 0
+}
+
+driver_remove() {
+	name="$1"
+	local next
+
+	registry_get "$name" >/dev/null || { log "没有这个驱动: $name"; return 1; }
+	rm -f "$DRIVERS_DIR/$name.so"
+	registry_drop "$name"
+
+	if [ "$(active_name)" = "$name" ]; then
+		rm -f "$ACTIVE_FILE"
+		next=$(awk -F'\t' 'NR == 1 { print $1; exit }' "$REGISTRY" 2>/dev/null)
+		[ -n "$next" ] && set_active "$next"
+	fi
+	if [ "$(applied_name)" = "$name" ]; then
+		rm -f "$TARGET_SO_MOD" "$APPLIED_FILE"
+	fi
+
+	if [ -n "$(active_name)" ]; then
+		driver_apply >/dev/null 2>&1 || true
+	else
+		touch "$PENDING"
+	fi
+	log "已删除驱动 $name (重启后 /system 里才会真正消失)"
+	return 0
+}
+
+# 由当前驱动形态拼出 ko 规则: ICD 改 icd.d 描述, HAL 改 vulkan.<hw>.so。
+# 两者不能混 —— 把 HAL 库塞进 ICD 重定向 (或反过来) loader 只会加载失败。
 build_rules() {
 	local rules d hwv
 
-	if [ "$PAYLOAD_SHAPE" = "hal" ]; then
-		[ -n "$PAYLOAD_SO" ] || return 1
+	if [ "$DRIVER_SHAPE" = "hal" ]; then
 		rules=""
 		hwv=$(getprop ro.hardware.vulkan 2>/dev/null)
 		if [ -n "$hwv" ] && [ "$hwv" != "mali" ]; then
-			rules="/vendor/lib64/hw/vulkan.$hwv.so|$PAYLOAD_SO"
+			rules="/vendor/lib64/hw/vulkan.$hwv.so|$TARGET_SO_DEV"
 		fi
-		rules="${rules}${rules:+;}/vendor/lib64/hw/vulkan.mali.so|$PAYLOAD_SO"
+		rules="${rules}${rules:+;}/vendor/lib64/hw/vulkan.mali.so|$TARGET_SO_DEV"
 	else
-		[ -n "$PAYLOAD_JSON" ] || return 1
 		rules=""
 		for d in /vendor/etc/vulkan/icd.d /system/etc/vulkan/icd.d /odm/etc/vulkan/icd.d; do
-			rules="${rules}${rules:+;}$d/*|$PAYLOAD_JSON"
+			rules="${rules}${rules:+;}$d/*|$TARGET_JSON_DEV"
 		done
 	fi
 
-	# ko 的 rules 参数缓冲区是 1024 字节, 超了就直接放弃这一轮
 	if [ ${#rules} -gt 900 ]; then
-		log "规则串过长 (${#rules} 字节), 请换短一点的载荷名"
+		log "规则串过长 (${#rules} 字节)"
 		return 1
 	fi
 	printf '%s' "$rules"
@@ -324,18 +476,22 @@ push_uids() {
 	return 0
 }
 
-# 载荷 -> ko 规则参数
+# 当前驱动 -> ko 规则参数
 push_rules() {
 	local rules
-	if [ -f "$MODDIR/pending-reboot" ]; then
-		log "刚导入的驱动要重启一次才会挂进 /system, 先重启再启用"
+	if needs_reboot; then
+		log "驱动刚换过, 要重启一次才会挂进 /system"
 		return 1
 	fi
-	select_payload >/dev/null 2>&1 || { log "没有可用的 PanVK 驱动载荷"; return 1; }
+	select_driver >/dev/null 2>&1 || { log "还没有导入驱动"; return 1; }
+	if [ "$(applied_name)" != "$DRIVER_NAME" ] || [ ! -f "$TARGET_SO_MOD" ]; then
+		log "驱动 $DRIVER_NAME 还没应用, 请在 WebUI 的驱动列表里选中它"
+		return 1
+	fi
 	rules=$(build_rules) || return 1
 	[ -n "$rules" ] || return 1
 	ko_set rules "$rules" || return 1
-	log "已下发规则 (载荷 $PAYLOAD_NAME)"
+	log "已下发规则 (驱动 $DRIVER_NAME, $DRIVER_SHAPE)"
 	return 0
 }
 
@@ -359,12 +515,16 @@ load_ko() {
 		log "没有勾选任何应用, 拒绝加载空模块"
 		return 1
 	fi
-	if ! select_payload; then
-		log "模块里没有可用的 PanVK 驱动, 请先用 import-driver.sh 导入一个"
+	if ! select_driver; then
+		log "还没有导入驱动, 先在 WebUI 的驱动面板里导入一个 .so"
 		return 1
 	fi
-	if [ -f "$MODDIR/pending-reboot" ]; then
-		log "刚导入的驱动要重启一次才会挂进 /system, 请先重启设备"
+	if needs_reboot; then
+		log "驱动刚换过, 请先重启设备"
+		return 1
+	fi
+	if [ "$(applied_name)" != "$DRIVER_NAME" ] || [ ! -f "$TARGET_SO_MOD" ]; then
+		log "驱动 $DRIVER_NAME 还没应用, 请在 WebUI 的驱动列表里选中它"
 		return 1
 	fi
 	rules=$(build_rules)
@@ -373,13 +533,13 @@ load_ko() {
 	# 先只带 uids 加载 (enabled 保持 0), 规则和开关随后经 sysfs 写入,
 	# 避免出现"规则还没下发就已经开始改写"的窗口
 	if insmod_ko "uids=$uids"; then
-		log "已加载: $KO (载荷 $PAYLOAD_NAME)"
+		log "已加载: $KO (驱动 $DRIVER_NAME)"
 	else
 		# 兜底: vermagic 不一致时学习 -> 回写 -> 重试
 		v=$(device_vermagic) || { log "拿不到设备 vermagic (vendor 模块和 kmsg 里都没有)"; return 1; }
 		rewrite_ko_vermagic "$v" || return 1
 		if insmod_ko "uids=$uids"; then
-			log "已加载(回写 vermagic 后): $KO (载荷 $PAYLOAD_NAME)"
+			log "已加载(回写 vermagic 后): $KO (驱动 $DRIVER_NAME)"
 		else
 			log "加载失败, 请查看内核日志 (dmesg | grep $MODNAME)"
 			return 1
@@ -391,7 +551,7 @@ load_ko() {
 		unload_ko
 		return 1
 	fi
-	log "已启用: 载荷 $PAYLOAD_NAME, 目标 UID $uids"
+	log "已启用: 驱动 $DRIVER_NAME, 目标 UID $uids"
 	return 0
 }
 
