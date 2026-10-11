@@ -1,0 +1,113 @@
+name: Build PanVK-Swapper
+
+# 本项目不在本地编译, 所有构建都在 GitHub 云端完成。
+# 构建环境: ddk (与 SakiSU 官方 LKM 相同的 GKI 官方构建环境)。
+# 矩阵覆盖各 GKI KMI 分支, 每个分支产出一个 ko; 汇总任务打出全 KMI 一体包,
+# 模块在设备上按 uname -r 自动选择。
+on:
+  push:
+    branches: [ main ]
+    paths: [ 'kernel/**', 'module/**', '.github/workflows/**' ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi: [android14-6.1, android13-5.15, android14-5.15, android15-6.6]
+        # ddk 还支持: android12-5.10, android13-5.10, android16-6.12,
+        # 需要时自行追加 (同时要在 module/common.sh 的 select_ko 里有对应分支)
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 ddk (SakiSU LKM 同款构建环境)
+        run: |
+          sudo curl -fsSL https://raw.githubusercontent.com/5ec1cff/ddk/main/scripts/ddk \
+            -o /usr/local/bin/ddk
+          sudo chmod +x /usr/local/bin/ddk
+
+      - name: 编译内核模块 (${{ matrix.kmi }})
+        run: |
+          cd kernel
+          ddk pull ${{ matrix.kmi }}
+          ddk build --target ${{ matrix.kmi }}
+
+      - name: 裁剪 ko 调试段
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm
+          llvm-objcopy --strip-debug kernel/panvk_swapper.ko
+
+      - name: 打包单 KMI 模块
+        run: |
+          mkdir -p pkg
+          cp -a module/. pkg/
+          cp kernel/panvk_swapper.ko pkg/panvk_swapper.ko
+          # 计算占位 vermagic 值的偏移与长度写入 offset 文件,
+          # 设备端 (busybox grep 无 -a/-b) 就不需要在二进制里做查找了
+          python3 - <<'EOF'
+          data = open('kernel/panvk_swapper.ko', 'rb').read()
+          i = data.find(b'vermagic=')
+          assert i >= 0, 'vermagic= not found in .modinfo'
+          j = data.index(b'\0', i)
+          print('vermagic value: offset=%d len=%d' % (i + 9, j - i - 9))
+          open('pkg/panvk_swapper.offset', 'w').write('%d %d\n' % (i + 9, j - i - 9))
+          EOF
+          cd pkg && zip -rq9 "$GITHUB_WORKSPACE/PanVK-Swapper-${{ matrix.kmi }}.zip" .
+
+      - name: 上传单 KMI 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: PanVK-Swapper-${{ matrix.kmi }}
+          path: PanVK-Swapper-*.zip
+
+  package-all:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 下载全部 KMI 产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: PanVK-Swapper-*
+
+      - name: 汇总多 KMI 一体包 (设备端按 uname -r 自动选择)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip
+          echo "--- 产物清单 ---"
+          find artifacts -type f
+          mkdir -p pkg/kos
+          cp -a module/. pkg/
+          python3 - <<'EOF'
+          import glob, zipfile, os, sys
+          found = []
+          for z in sorted(glob.glob('artifacts/PanVK-Swapper-*/*.zip')):
+              kmi = os.path.basename(z)[:-4].replace('PanVK-Swapper-', '')
+              try:
+                  mod = zipfile.ZipFile(z)
+                  open('pkg/kos/panvk_swapper-%s.ko' % kmi, 'wb').write(
+                      mod.read('panvk_swapper.ko'))
+                  open('pkg/kos/panvk_swapper-%s.offset' % kmi, 'wb').write(
+                      mod.read('panvk_swapper.offset'))
+                  found.append(kmi)
+                  print('收录:', kmi)
+              except Exception as e:
+                  print('!! 跳过', kmi, ':', e)
+          print('汇总结果:', found)
+          if 'android14-6.1' not in found:
+              sys.exit('主目标 android14-6.1 缺失')
+          EOF
+          cd pkg && zip -rq9 "$GITHUB_WORKSPACE/PanVK-Swapper-all-kmi.zip" .
+
+      - name: 上传一体包
+        uses: actions/upload-artifact@v4
+        with:
+          name: PanVK-Swapper-all-kmi
+          path: PanVK-Swapper-all-kmi.zip

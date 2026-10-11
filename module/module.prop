@@ -1,0 +1,6 @@
+id=panvk_swapper
+name=PanVK Swapper
+version=v0.1.0
+versionCode=1
+author=ZRen277353
+description=按应用把用户层图形驱动替换为 PanVK 开源驱动: WebUI 勾选应用, 内核模块只重定向这些进程的 Vulkan ICD 加载路径 (多 GKI KMI 自动适配)。

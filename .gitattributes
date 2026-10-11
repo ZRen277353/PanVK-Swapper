@@ -1,0 +1,4 @@
+# 所有文本文件统一 LF —— shell 脚本要推到 Android 设备上运行, CRLF 会直接报错
+* text=auto eol=lf
+*.png binary
+*.zip binary

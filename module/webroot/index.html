@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<title>PanVK Swapper</title>
+	<link rel="stylesheet" href="style.css">
+</head>
+<body>
+	<main class="shell">
+		<header class="topbar">
+			<div>
+				<p class="eyebrow">PanVK Swapper</p>
+				<h1>驱动替换</h1>
+			</div>
+			<span id="statePill" class="pill off">读取中</span>
+		</header>
+
+		<section class="panel master">
+			<div class="master-copy">
+				<h2>替换开关</h2>
+				<p id="masterHint">正在读取状态...</p>
+			</div>
+			<button id="toggleBtn" class="primary" type="button" disabled>启用</button>
+		</section>
+
+		<section class="panel notice" id="noticePanel" hidden>
+			<h2>驱动状态</h2>
+			<p id="noticeText"></p>
+		</section>
+
+		<section class="panel">
+			<h2>开机自启</h2>
+			<div class="rows">
+				<label class="switch-row">
+					<span>
+						<strong>开机自动启用</strong>
+						<small id="autoStartHint">关闭</small>
+					</span>
+					<input id="autoStartSwitch" type="checkbox">
+				</label>
+			</div>
+		</section>
+
+		<section class="panel picker">
+			<div class="section-head">
+				<h2>应用列表</h2>
+				<span id="selCount" class="count">已选 0</span>
+			</div>
+
+			<div class="picker-tools">
+				<input id="searchInput" class="search" type="search" placeholder="搜索包名" autocomplete="off" spellcheck="false" aria-label="搜索包名">
+				<label class="mini-switch">
+					<input id="sysToggle" type="checkbox">
+					<span>系统应用</span>
+				</label>
+			</div>
+
+			<div id="appList" class="app-list" role="list"></div>
+
+			<div class="picker-foot">
+				<span id="listHint" class="muted">正在加载应用列表...</span>
+				<button id="saveBtn" class="primary" type="button" disabled>保存选择</button>
+			</div>
+		</section>
+
+		<section class="panel logs">
+			<div class="section-head">
+				<h2>运行日志</h2>
+				<button id="refreshLogsBtn" class="secondary" type="button">刷新</button>
+			</div>
+			<pre id="logBox">读取中...</pre>
+		</section>
+
+		<div id="toast" class="toast" role="status" aria-live="polite"></div>
+	</main>
+	<script src="app.js"></script>
+</body>
+</html>
