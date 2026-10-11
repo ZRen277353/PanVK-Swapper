@@ -45,6 +45,10 @@ const els = {
 	scanBtn: document.getElementById("scanBtn"),
 	scanList: document.getElementById("scanList"),
 	applyDriverBtn: document.getElementById("applyDriverBtn"),
+	openImportBtn: document.getElementById("openImportBtn"),
+	closeImportBtn: document.getElementById("closeImportBtn"),
+	importSheet: document.getElementById("importSheet"),
+	sheetBackdrop: document.getElementById("sheetBackdrop"),
 	toast: document.getElementById("toast"),
 };
 
@@ -167,6 +171,7 @@ function setBusy(isBusy) {
 	els.importBtn.disabled = isBusy;
 	els.scanBtn.disabled = isBusy;
 	els.applyDriverBtn.disabled = isBusy;
+	els.openImportBtn.disabled = isBusy;
 }
 
 function isDirty() {
@@ -298,7 +303,22 @@ async function loadApps() {
 	}
 
 	state.apps.sort((a, b) =>
-		a.label.localeCompare(b.label, "zh-Hans") || a.name.localeCompare(b.name));
+		sortApps(a, b));
+	renderApps();
+}
+
+/* 已勾选的排前面, 其余按名字排 */
+function sortApps(a, b) {
+	const sa = state.selected.has(a.name) ? 0 : 1;
+	const sb = state.selected.has(b.name) ? 0 : 1;
+	if (sa !== sb) {
+		return sa - sb;
+	}
+	return a.label.localeCompare(b.label, "zh-Hans") || a.name.localeCompare(b.name);
+}
+
+function resortApps() {
+	state.apps.sort(sortApps);
 	renderApps();
 }
 
@@ -685,20 +705,47 @@ function removeDriver(name, wasActive) {
 }
 
 function importDriver() {
+	const name = els.importName.value.trim();
 	const path = els.importPath.value.trim();
+	const gpu = els.importGpu.value.trim();
 	if (!path) {
-		showToast("先填驱动文件路径, 或点扫描选一个", true);
+		showToast("第二个输入框填驱动文件路径 (或点扫描选一个)", true);
 		return Promise.resolve();
 	}
-	const name = els.importName.value.trim();
-	const gpu = els.importGpu.value.trim();
-	return withRefresh(async () => {
-		const result = await run(`driver-import '${path}' '${name}' '${gpu}'`);
-		els.importPath.value = "";
-		els.importName.value = "";
-		els.importGpu.value = "";
-		return result;
-	}, "已导入");
+	if (state.busy) {
+		return Promise.resolve();
+	}
+	return (async () => {
+		setBusy(true);
+		try {
+			const result = await run(`driver-import '${path}' '${name}' '${gpu}'`);
+			showToast(result.stdout.trim() || "已导入");
+			els.importName.value = "";
+			els.importPath.value = "";
+			els.importGpu.value = "";
+			closeImportSheet();
+			await refreshStatus().catch(() => {});
+			await loadDrivers().catch(() => {});
+			await refreshLogs().catch(() => {});
+		} catch (error) {
+			showToast(error.message, true);
+			await loadDrivers().catch(() => {});
+		} finally {
+			setBusy(false);
+		}
+	})();
+}
+
+function openImportSheet() {
+	els.importSheet.hidden = false;
+	els.sheetBackdrop.hidden = false;
+	els.importName.focus();
+}
+
+function closeImportSheet() {
+	els.importSheet.hidden = true;
+	els.sheetBackdrop.hidden = true;
+	els.scanList.hidden = true;
 }
 
 function applyDriver() {
@@ -783,6 +830,7 @@ async function saveSelection() {
 		const result = await run("apps-apply");
 		showToast(result.stdout.trim() || "选择已保存");
 		await refreshStatus();
+		resortApps();
 		await refreshLogs();
 	} catch (error) {
 		showToast(error.message, true);

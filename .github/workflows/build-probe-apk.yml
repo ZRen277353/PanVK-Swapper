@@ -1,0 +1,46 @@
+name: Build PanVK Probe APK
+
+# 探测 APK: Kotlin + Miuix UI + JNI(Vulkan) , 用来在替换驱动前后对比
+# OpenGL/Vulkan 扩展数量、设备信息、功能与渲染测试结果。
+on:
+  push:
+    branches: [ main ]
+    paths: [ 'probe/**', '.github/workflows/build-probe-apk.yml' ]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 准备 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 platform 36 / build-tools / NDK
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-36" "build-tools;35.0.0" "ndk;27.3.13750724"
+
+      - name: 安装 Gradle 8.12
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.12'
+
+      - name: 编译 debug APK
+        working-directory: probe
+        run: gradle assembleDebug --no-daemon --console=plain
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: panvk-probe-apk
+          path: probe/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

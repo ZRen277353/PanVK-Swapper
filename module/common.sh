@@ -274,6 +274,18 @@ sanitize_name() {
 		sed -e 's/\.so$//' -e 's/^lib//' -e 's/[^a-z0-9]\+/-/g' -e 's/^-*//' -e 's/-*$//'
 }
 
+# 用户填的驱动名: 允许中文等任意字符, 只去掉会破坏路径/命令的字符, 空格换成 -
+sanitize_driver_name() {
+	printf '%s' "$1" |
+		tr ' ' '-' |
+		tr -d '/' |
+		tr -d '\\' |
+		tr -d "'" |
+		tr -d '"' |
+		tr -d '\r' | tr -d '\n' | tr -d '\t' |
+		sed -e 's/^[.-]*//' -e 's/[.-]*$//'
+}
+
 # drivers.tsv: name / shape / gpu_match / 原始文件名 / 大小 / 导入时间
 registry_get() {
 	[ -f "$REGISTRY" ] || return 1
@@ -370,11 +382,13 @@ driver_import() {
 	fi
 	[ "$shape" = "unknown" ] && shape="icd"
 
-	[ -n "$name" ] || name=$(sanitize_name "$(basename "$src")")
+	if [ -n "$name" ]; then
+		name=$(sanitize_driver_name "$name")
+	else
+		name=$(sanitize_name "$(basename "$src")")
+	fi
 	[ -n "$name" ] || name="driver"
-	case "$name" in
-		*[!a-z0-9-]*) log "驱动名只能用小写字母/数字/短横线: $name"; return 1 ;;
-	esac
+	[ ${#name} -le 48 ] || { log "驱动名太长 (最多 48 字节): $name"; return 1; }
 
 	mkdir -p "$DRIVERS_DIR" || return 1
 	cp -f "$src" "$DRIVERS_DIR/$name.so" || { log "拷贝失败 (空间不足?)"; return 1; }

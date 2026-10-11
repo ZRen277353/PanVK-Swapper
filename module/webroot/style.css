@@ -551,24 +551,66 @@ button:disabled {
 	margin: 0;
 }
 
-.driver-import {
-	display: grid;
+.driver-foot-actions {
+	display: flex;
 	gap: 8px;
-	margin-top: 12px;
-	padding-top: 12px;
-	border-top: 1px solid var(--line);
+	flex: 0 0 auto;
 }
 
-.import-row {
+/* 导入驱动: 单独一屏 */
+.sheet-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 8;
+	background: rgba(5, 7, 10, 0.66);
+}
+
+.sheet {
+	position: fixed;
+	right: 12px;
+	bottom: 12px;
+	left: 12px;
+	z-index: 9;
+	max-width: 720px;
+	max-height: calc(100vh - 24px);
+	overflow: auto;
+	margin: 0 auto;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	padding: 16px;
+	background: var(--panel);
+	box-shadow: 0 20px 48px rgba(0, 0, 0, 0.5);
+}
+
+.sheet-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-bottom: 12px;
+}
+
+.sheet-head h2 {
+	margin-bottom: 0;
+}
+
+.field {
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-	gap: 8px;
+	gap: 6px;
+	margin-bottom: 10px;
+}
+
+.field > span {
+	color: var(--muted);
+	font-size: 12px;
+	font-weight: 700;
 }
 
 .import-actions {
 	display: flex;
 	justify-content: flex-end;
 	gap: 8px;
+	margin-top: 4px;
 }
 
 .mini-btn {
