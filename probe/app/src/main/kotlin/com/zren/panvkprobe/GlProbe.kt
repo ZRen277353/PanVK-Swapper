@@ -186,7 +186,10 @@ object GlProbe {
         GLES20.glDeleteTextures(1, tex, 0)
         GLES20.glDeleteProgram(prog)
 
-        return "GL 渲染测试: 三角形 x$frames 帧, 平均 %.3f ms/帧 (%.0f fps), 中心像素 rgb(%d,%d,%d)\n"
-            .format(ms / frames, 1000.0 / (ms / frames), r, g, b)
+        return String.format(
+            java.util.Locale.US,
+            "GL 渲染测试: 三角形 x%d 帧, 平均 %.3f ms/帧 (%.0f fps), 中心像素 rgb(%d,%d,%d)\n",
+            frames, ms / frames, 1000.0 / (ms / frames), r, g, b
+        )
     }
 }

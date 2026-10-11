@@ -3,3 +3,4 @@ build/
 .gradle/
 app/build/
 app/.cxx/
+.kotlin/

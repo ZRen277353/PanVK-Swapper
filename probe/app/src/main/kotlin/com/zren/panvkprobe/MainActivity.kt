@@ -73,7 +73,8 @@ private fun ProbeScreen() {
 
     androidx.compose.runtime.LaunchedEffect(refreshKey) { refresh() }
 
-    Scaffold(topBar = { TopAppBar(title = "PanVK 探针") }) { padding ->
+    // 参数顺序按 Miuix 0.8.8 的签名核对过, 这里用位置参数, 避免命名参数不匹配
+    Scaffold(Modifier, { TopAppBar("PanVK 探针") }) { padding ->
         Column(
             modifier = Modifier
                 .padding(padding)
@@ -107,14 +108,17 @@ private fun ProbeScreen() {
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Button(onClick = { refreshKey++ }, enabled = !busy, modifier = Modifier.weight(1f)) {
+                Button({ refreshKey++ }, Modifier.weight(1f), !busy) {
                     Text(if (busy) "检测中..." else "重新检测")
                 }
                 Button(
-                    onClick = {
+                    {
                         val dir = context.getExternalFilesDir(null)
-                        val file = File(dir, "panvk-probe-" +
-                            SimpleDateFormat("MMdd-HHmmss", Locale.US).format(Date()) + ".txt")
+                        val file = File(
+                            dir,
+                            "panvk-probe-" +
+                                SimpleDateFormat("MMdd-HHmmss", Locale.US).format(Date()) + ".txt"
+                        )
                         runCatching {
                             file.writeText(
                                 "== 驱动环境 ==\n$envText\n== OpenGL ES ==\n$glText\n== Vulkan ==\n$vkText\n"
@@ -122,8 +126,8 @@ private fun ProbeScreen() {
                             savedPath = file.absolutePath
                         }
                     },
-                    enabled = !busy,
-                    modifier = Modifier.weight(1f)
+                    Modifier.weight(1f),
+                    !busy
                 ) {
                     Text("保存报告")
                 }
