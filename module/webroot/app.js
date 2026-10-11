@@ -164,7 +164,7 @@ function showToast(message, isError = false) {
 
 function setBusy(isBusy) {
 	state.busy = isBusy;
-	els.toggleBtn.disabled = isBusy;
+	// 启用按钮保持常亮: 点它时若条件不满足, 由 control.sh 给出明确原因
 	els.autoStartSwitch.disabled = isBusy;
 	els.refreshLogsBtn.disabled = isBusy;
 	els.saveBtn.disabled = isBusy || !isDirty();
@@ -249,9 +249,12 @@ function applyStatus(data) {
 		notices.push("驱动刚换过, 重启一次后生效。");
 		warn = true;
 	} else if (!warn) {
-		const shape = data.driver_shape === "hal" ? "HAL"
-			: data.driver_shape === "icd" ? "ICD" : "未知形态";
+		const shape = shapeLabel(data.driver_shape);
 		notices.push(`GPU ${gpu}, 当前驱动 ${data.driver} (${shape}, 共 ${data.driver_count || "0"} 个)。`);
+		if (data.driver_shape === "hmi") {
+			notices.push("该驱动只导出 HMI, 标准 loader 不认, 替换后可能没有任何 Vulkan 设备。");
+			warn = true;
+		}
 	}
 	els.noticePanel.hidden = false;
 	els.noticePanel.classList.toggle("ok", !warn);
@@ -261,6 +264,19 @@ function applyStatus(data) {
 	els.autoStartHint.textContent = data.auto_start === "1" ? "开启" : "关闭";
 
 	els.storePath.textContent = data.store || "";
+}
+
+function shapeLabel(shape) {
+	if (shape === "hal") {
+		return "HAL";
+	}
+	if (shape === "hmi") {
+		return "HAL/HMI";
+	}
+	if (shape === "icd") {
+		return "ICD";
+	}
+	return "未知形态";
 }
 
 function applySelectionFromStatus() {
@@ -627,7 +643,7 @@ function renderDrivers() {
 		title.textContent = d.name;
 		const sub = document.createElement("span");
 		sub.className = "driver-sub";
-		const bits = [d.orig || "-", (d.shape || "?").toUpperCase(), formatSize(d.size)];
+		const bits = [d.orig || "-", shapeLabel(d.shape), formatSize(d.size)];
 		if (d.gpu && d.gpu !== "-") {
 			bits.push(d.gpu);
 		}
@@ -667,6 +683,10 @@ function renderDrivers() {
 		els.driverHint.textContent = `当前使用 ${active.name}; 换驱动后需要重启一次`;
 	} else {
 		els.driverHint.textContent = `${active.name} 已选中但还没生效, 重启后生效`;
+	}
+	if (active && active.shape === "hmi") {
+		els.driverHint.textContent =
+			"注意: 这个驱动只导出 HMI, Android 标准 loader 不认, 替换后 Vulkan 可能没有设备";
 	}
 }
 
@@ -897,6 +917,24 @@ els.scanBtn.addEventListener("click", () => {
 
 els.applyDriverBtn.addEventListener("click", () => {
 	void applyDriver();
+});
+
+els.openImportBtn.addEventListener("click", () => {
+	openImportSheet();
+});
+
+els.closeImportBtn.addEventListener("click", () => {
+	closeImportSheet();
+});
+
+els.sheetBackdrop.addEventListener("click", () => {
+	closeImportSheet();
+});
+
+document.addEventListener("keydown", (event) => {
+	if (event.key === "Escape" && !els.importSheet.hidden) {
+		closeImportSheet();
+	}
 });
 
 document.addEventListener("visibilitychange", () => {

@@ -16,10 +16,18 @@ object EnvProbe {
         val libs = LinkedHashSet<String>()
         runCatching {
             File("/proc/self/maps").forEachLine { line ->
-                val path = line.substringAfterLast(' ')
-                val l = path.lowercase()
-                if (l.contains("vulkan") || l.contains("mali") || l.contains("panvk") ||
-                    l.contains("panfrost") || l.contains("libEGL") || l.contains("libGLES")
+                val path = line.substringAfterLast(' ').trim()
+                if (!path.startsWith("/")) return@forEachLine
+                // 应用自己的路径里含 "panvk" (包名), 必须排掉, 否则永远误判成"已替换"
+                if (path.startsWith("/data/app/") || path.startsWith("/data/data/") ||
+                    path.startsWith("/data/user/") || path.startsWith("/data/dalvik-cache/") ||
+                    path.startsWith("/data/misc/")
+                ) {
+                    return@forEachLine
+                }
+                val base = path.substringAfterLast('/').lowercase()
+                if (base.contains("vulkan") || base.contains("mali") || base.contains("panvk") ||
+                    base.contains("panfrost") || base.contains("libegl") || base.contains("libgles")
                 ) {
                     libs.add(path)
                 }
@@ -30,6 +38,28 @@ object EnvProbe {
         } else {
             libs.forEach { sb.append("  $it\n") }
             sb.append(driverVerdict(libs))
+        }
+
+        sb.append("\n驱动候选路径:\n")
+        val platform = runCatching { android.os.Build.HARDWARE }.getOrDefault("")
+        val candidates = mutableListOf(
+            "/vendor/lib64/hw/vulkan.mali.so",
+            "/vendor/lib64/hw/vulkan.adreno.so",
+            "/system/lib64/libvulkan_panvk.so",
+            "/system/etc/panvk/icd.d/panvk.json"
+        )
+        if (platform.isNotEmpty()) {
+            candidates.add("/vendor/lib64/hw/$platform/vulkan.mali.so")
+        }
+        for (p in candidates) {
+            val f = File(p)
+            if (!f.exists()) {
+                sb.append("  $p -> 不存在\n")
+                continue
+            }
+            val real = runCatching { f.canonicalPath }.getOrNull() ?: p
+            sb.append("  $p -> 存在 (${f.length()} 字节)" +
+                if (real != p) ", 指向 $real\n" else "\n")
         }
 
         sb.append("\n厂商 ICD 描述文件:\n")
@@ -55,11 +85,18 @@ object EnvProbe {
     }
 
     private fun driverVerdict(libs: Set<String>): String {
-        val joined = libs.joinToString(" ").lowercase()
+        // 只看文件名, 不看完整路径 (应用目录里也可能出现关键词)
+        val bases = libs.map { it.substringAfterLast('/').lowercase() }
+        val hasPanvk = bases.any { it.contains("panvk") || it.contains("panfrost") }
+        val hasVendor = bases.any {
+            it.contains("vulkan.mali") || it.contains("vulkan.adreno") ||
+                it.contains("libgles_mali") || it.contains("vulkan.kmgsl")
+        }
+        val hasLoader = bases.any { it == "libvulkan.so" }
         val kind = when {
-            joined.contains("panvk") || joined.contains("panfrost") -> "PanVK / panfrost (已替换)"
-            joined.contains("vulkan.mali") || joined.contains("mali") -> "厂商 Mali 驱动 (原版)"
-            joined.contains("vulkan.adreno") || joined.contains("adreno") -> "厂商 Adreno 驱动 (原版)"
+            hasPanvk -> "PanVK / panfrost (替换成功, 已经加载)"
+            hasVendor -> "厂商驱动 (原版)"
+            hasLoader -> "只有 loader, 没有任何驱动被加载 —— 替换的 so 很可能不是标准 HAL/ICD"
             else -> "未识别"
         }
         return "  判断: $kind\n"

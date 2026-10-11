@@ -256,13 +256,19 @@ driver_elf_ok() {
 	return 0
 }
 
-# 形态: icd (有 ICD 接口) / hal (有 HAL 模块标记) / unknown
+# 形态: icd (有 ICD 接口) / hal (标准 HAL 模块) / hmi (只导出 HMI) / unknown
+#
+# hmi 是 Winlator/Vortek 那套 loader 用的符号; Android 标准 loader 只认
+# HAL_MODULE_INFO_SYM (HAL 路线) 或 vk_icdGetInstanceProcAddr (ICD 路线),
+# 所以这种载荷替换上去会出现"loader 正常但一个 Vulkan 设备都没有"。
 driver_shape() {
 	f="$1"
 	if grep -q 'vk_icdGetInstanceProcAddr' "$f" 2>/dev/null; then
 		printf 'icd'
-	elif grep -q 'HAL_MODULE_INFO_SYM' "$f" 2>/dev/null || grep -q 'HMI' "$f" 2>/dev/null; then
+	elif grep -q 'HAL_MODULE_INFO_SYM' "$f" 2>/dev/null; then
 		printf 'hal'
+	elif grep -q 'HMI' "$f" 2>/dev/null; then
+		printf 'hmi'
 	else
 		printf 'unknown'
 	fi
@@ -381,6 +387,11 @@ driver_import() {
 		return 1
 	fi
 	[ "$shape" = "unknown" ] && shape="icd"
+	if [ "$shape" = "hmi" ]; then
+		log "警告: 这个驱动只导出 HMI (Winlator/Vortek 那套 loader 的符号),"
+		log "      Android 标准 loader 要的是 HAL_MODULE_INFO_SYM 或 vk_icdGetInstanceProcAddr,"
+		log "      直接用会出现「loader 正常但一个 Vulkan 设备都没有」。"
+	fi
 
 	if [ -n "$name" ]; then
 		name=$(sanitize_driver_name "$name")
@@ -453,13 +464,20 @@ driver_remove() {
 build_rules() {
 	local rules d hwv
 
-	if [ "$DRIVER_SHAPE" = "hal" ]; then
+	if [ "$DRIVER_SHAPE" = "hal" ] || [ "$DRIVER_SHAPE" = "hmi" ]; then
 		rules=""
 		hwv=$(getprop ro.hardware.vulkan 2>/dev/null)
 		if [ -n "$hwv" ] && [ "$hwv" != "mali" ]; then
 			rules="/vendor/lib64/hw/vulkan.$hwv.so|$TARGET_SO_DEV"
 		fi
 		rules="${rules}${rules:+;}/vendor/lib64/hw/vulkan.mali.so|$TARGET_SO_DEV"
+		# 有的天玑把驱动放在 /vendor/lib64/hw/<platform>/ 下 (例如 mt6989),
+		# loader 打开的是上层的符号链接, 但顺手把这些真实路径也加上更保险
+		for f in /vendor/lib64/hw/*/vulkan.mali.so; do
+			[ -f "$f" ] || continue
+			[ "$f" = "/vendor/lib64/hw/vulkan.mali.so" ] && continue
+			rules="$rules;$f|$TARGET_SO_DEV"
+		done
 	else
 		rules=""
 		for d in /vendor/etc/vulkan/icd.d /system/etc/vulkan/icd.d /odm/etc/vulkan/icd.d; do

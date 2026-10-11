@@ -578,6 +578,9 @@ Java_com_zren_panvkprobe_ProbeNative_vulkanReport(JNIEnv *env, jclass clazz)
 	res = vkEnumeratePhysicalDevices(inst, &count, NULL);
 	if (res != VK_SUCCESS || count == 0) {
 		ap("没有枚举到物理设备 (VkResult=%d)\n", res);
+		ap("说明: loader 起来了但没有任何驱动被加载。常见原因是替换上去的 so\n");
+		ap("      不是标准 HAL (缺 HAL_MODULE_INFO_SYM) 也不是 ICD\n");
+		ap("      (缺 vk_icdGetInstanceProcAddr), 例如只导出 HMI 的 Winlator 版驱动。\n");
 		vkDestroyInstance(inst, NULL);
 		return (*env)->NewStringUTF(env, g_report);
 	}

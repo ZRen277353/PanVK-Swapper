@@ -96,7 +96,7 @@ object GlProbe {
         val maxTex = IntArray(1)
         GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maxTex, 0)
         val maxRb = IntArray(1)
-        GLES20.glGetIntegerv(0x8D41, maxRb, 0) // GL_MAX_RENDERBUFFER_SIZE
+        GLES30.glGetIntegerv(GLES30.GL_MAX_RENDERBUFFER_SIZE, maxRb, 0)
         sb.append("GL_MAX_TEXTURE_SIZE: ${maxTex[0]}  GL_MAX_RENDERBUFFER_SIZE: ${maxRb[0]}\n")
 
         sb.append(renderTest())
